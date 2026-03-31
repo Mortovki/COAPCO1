@@ -1,0 +1,107 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile information",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" },
+        "firstName": { "type": "string" },
+        "lastNamePaterno": { "type": "string" },
+        "lastNameMaterno": { "type": "string" },
+        "phone": { "type": "string" },
+        "studentId": { "type": "string" },
+        "career": { "type": "string" },
+        "brigadePeriod": { "type": "string" },
+        "status": { "type": "string" },
+        "role": { "type": "string", "enum": ["admin", "user"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "firstName", "lastNamePaterno", "lastNameMaterno", "phone", "studentId", "career", "role", "createdAt", "brigadePeriod", "status"]
+    },
+    "Project": {
+      "title": "Project",
+      "description": "Project information",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "color": { "type": "string" }
+      },
+      "required": ["id", "name"]
+    },
+    "Category": {
+      "title": "Category",
+      "description": "Category information",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "icon": { "type": "string" }
+      },
+      "required": ["id", "name"]
+    },
+    "Task": {
+      "title": "Task",
+      "description": "Task information within a project",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "projectId": { "type": "string" },
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "status": { "type": "string", "enum": ["todo", "working_on_it", "waiting_review", "stuck", "done"] },
+        "priority": { "type": "number", "enum": [1, 2, 3, 4, 5] },
+        "effort": { "type": "number" },
+        "type": { "type": "string", "enum": ["feature", "bug", "quality", "security", "operations"] },
+        "assignedTo": { "type": "string" },
+        "startDate": { "type": "string", "format": "date-time" },
+        "endDate": { "type": "string", "format": "date-time" },
+        "phase": { "type": "string" },
+        "epic": { "type": "string" },
+        "estimatedSP": { "type": "number" },
+        "categoryId": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "createdBy": { "type": "string" }
+      },
+      "required": ["id", "projectId", "title", "status", "priority", "type", "createdAt", "createdBy"]
+    },
+    "Note": {
+      "title": "Note",
+      "description": "Note for a task",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "content": { "type": "string" },
+        "authorUid": { "type": "string" },
+        "authorName": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "editedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "content", "authorUid", "authorName", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{uid}": {
+      "schema": "User",
+      "description": "Collection of user profiles"
+    },
+    "/projects/{projectId}": {
+      "schema": "Project",
+      "description": "Collection of projects"
+    },
+    "/categories/{categoryId}": {
+      "schema": "Category",
+      "description": "Collection of categories"
+    },
+    "/projects/{projectId}/tasks/{taskId}": {
+      "schema": "Task",
+      "description": "Collection of tasks for a project"
+    },
+    "/projects/{projectId}/tasks/{taskId}/notes/{noteId}": {
+      "schema": "Note",
+      "description": "Collection of notes for a task"
+    }
+  }
+}

@@ -1,0 +1,132 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users
+    // Document ID: {uid}
+    // Fields:
+    //   - uid: string (required) - The user's unique ID
+    //   - email: string (required) - The user's email address
+    //   - firstName: string (required) - The user's first name
+    //   - lastNamePaterno: string (required) - The user's paternal last name
+    //   - lastNameMaterno: string (required) - The user's maternal last name
+    //   - phone: string (required) - The user's phone number
+    //   - studentId: string (required) - The user's student ID
+    //   - career: string (required) - The user's career
+    //   - brigadePeriod: string (required) - The brigade period
+    //   - status: string (required) - The global status
+    //   - role: string (required, enum: ["admin", "user"]) - The user's role
+    //   - createdAt: string (required, format: date-time) - The creation timestamp
+    //
+    // Collection: projects
+    // Document ID: {projectId}
+    // Fields:
+    //   - id: string (required)
+    //   - name: string (required)
+    //   - color: string (optional)
+    //
+    // Collection: categories
+    // Document ID: {categoryId}
+    // Fields:
+    //   - id: string (required)
+    //   - name: string (required)
+    //   - icon: string (optional)
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isSuperAdmin() {
+      return isAuthenticated() && request.auth.token.email == "mortovki@gmail.com" && request.auth.token.email_verified == true;
+    }
+
+    function isStaff() {
+      return isAuthenticated() &&
+        ((exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['admin', 'coordinator']) ||
+          isSuperAdmin() ||
+          (request.auth.token.email == "luisedgar.gutierrez17@gmail.com" && request.auth.token.email_verified == true) ||
+          (request.auth.token.email == "luis.gutierrez@fa.unam.mx" && request.auth.token.email_verified == true));
+    }
+
+    function isValidCategory(data) {
+      return data.keys().hasAll(['id', 'name']) &&
+             data.id is string &&
+             data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
+             (!('color' in data) || (data.color is string && data.color.size() <= 20));
+    }
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['uid', 'email', 'firstName', 'lastNamePaterno', 'lastNameMaterno', 'phone', 'studentId', 'career', 'role', 'createdAt', 'brigadePeriod', 'status']) &&
+             data.uid is string &&
+             data.email is string &&
+             data.firstName is string && data.firstName.size() > 0 &&
+             data.lastNamePaterno is string &&
+             data.lastNameMaterno is string &&
+             data.phone is string &&
+             data.studentId is string &&
+             data.career is string &&
+             data.brigadePeriod is string &&
+             data.status is string &&
+             data.role in ['admin', 'coordinator', 'user'] &&
+             data.createdAt is string;
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /users/{uid} {
+      allow read: if isOwner(uid) || isStaff();
+      
+      allow create: if (isOwner(uid) || isStaff()) && isValidUser(request.resource.data) && 
+                      (request.resource.data.role == 'user' || isStaff());
+      
+      allow update: if (isOwner(uid) || isStaff()) && isValidUser(request.resource.data) &&
+                      (
+                        request.resource.data.role == resource.data.role || 
+                        (isSuperAdmin() && request.resource.data.role == 'user') ||
+                        (isStaff() && request.resource.data.role in ['admin', 'coordinator'])
+                      );
+      
+      allow delete: if isStaff();
+    }
+
+    match /projects/{projectId} {
+      allow read: if isAuthenticated();
+      allow write: if isStaff();
+      
+      match /tasks/{taskId} {
+        allow read: if isAuthenticated();
+        allow create: if isStaff();
+        allow update: if isAuthenticated(); // Users can update status, priority, effort, etc.
+        allow delete: if isStaff();
+        
+        match /notes/{noteId} {
+          allow read: if isAuthenticated();
+          allow create: if isAuthenticated();
+          allow update, delete: if isOwner(resource.data.authorUid) || isStaff();
+        }
+      }
+    }
+
+    match /categories/{categoryId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated();
+      allow update, delete: if isStaff();
+    }
+  }
+}
