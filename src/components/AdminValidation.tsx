@@ -2,7 +2,7 @@ import * as React from 'react';
 import { Check, X, Clock, CheckCircle2, XCircle, Send } from 'lucide-react';
 import { doc, setDoc } from 'firebase/firestore';
 import { db } from '../firebase';
-import { handleFirestoreError, OperationType } from '../App';
+import { handleFirestoreError, OperationType } from '../firebase';
 import toast from 'react-hot-toast';
 
 const VALIDATION_STATUS = {

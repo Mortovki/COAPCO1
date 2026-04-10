@@ -18,7 +18,7 @@ export const ResponsiveFilterBar: React.FC<ResponsiveFilterBarProps> = ({ option
   const [isSheetOpen, setIsSheetOpen] = useState(false);
 
   const toggleOption = (id: string) => {
-    if (selectedIds.includes(id)) {
+    if ((selectedIds || []).includes(id)) {
       onChange(selectedIds.filter(v => v !== id));
     } else {
       onChange([...selectedIds, id]);
@@ -38,7 +38,7 @@ export const ResponsiveFilterBar: React.FC<ResponsiveFilterBarProps> = ({ option
           {title}
         </div>
         {options.map(opt => {
-          const isSelected = selectedIds.includes(opt.id);
+          const isSelected = (selectedIds || []).includes(opt.id);
           return (
             <button
               key={opt.id}
@@ -53,7 +53,7 @@ export const ResponsiveFilterBar: React.FC<ResponsiveFilterBarProps> = ({ option
             </button>
           );
         })}
-        {selectedIds.length > 0 && (
+        {(selectedIds || []).length > 0 && (
           <button
             onClick={clearFilters}
             className="ml-2 p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-full transition-colors"
@@ -69,20 +69,20 @@ export const ResponsiveFilterBar: React.FC<ResponsiveFilterBarProps> = ({ option
         <button
           onClick={() => setIsSheetOpen(true)}
           className={`flex items-center gap-2 px-4 py-3 rounded-xl border ${
-            selectedIds.length > 0
+            (selectedIds || []).length > 0
               ? 'bg-indigo-50 border-indigo-200 text-indigo-700'
               : 'bg-white border-slate-200 text-slate-700'
           } font-bold text-sm shadow-sm w-full justify-center`}
         >
           <Filter size={18} />
-          {title} {selectedIds.length > 0 && `(${selectedIds.length})`}
+          {title} {(selectedIds || []).length > 0 && `(${(selectedIds || []).length})`}
         </button>
 
         <BottomSheet isOpen={isSheetOpen} onClose={() => setIsSheetOpen(false)} title={title}>
           <div className="space-y-4">
             <div className="flex flex-col gap-3">
               {options.map(opt => {
-                const isSelected = selectedIds.includes(opt.id);
+                const isSelected = (selectedIds || []).includes(opt.id);
                 return (
                   <button
                     key={opt.id}
@@ -100,7 +100,7 @@ export const ResponsiveFilterBar: React.FC<ResponsiveFilterBarProps> = ({ option
               })}
             </div>
             
-            {selectedIds.length > 0 && (
+            {(selectedIds || []).length > 0 && (
               <button
                 onClick={() => { clearFilters(); setIsSheetOpen(false); }}
                 className="w-full py-4 mt-4 text-red-600 font-bold rounded-2xl bg-red-50 border border-red-100"

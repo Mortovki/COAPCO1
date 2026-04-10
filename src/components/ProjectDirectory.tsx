@@ -1,17 +1,21 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Folder, FileText, ExternalLink, Plus, Edit2, Save, Trash2, X, PlayCircle, ChevronRight, Search, MoreHorizontal, Copy, Download, Pencil } from 'lucide-react';
+import { Folder, FileText, ExternalLink, Plus, Edit2, Save, Trash2, X, PlayCircle, ChevronRight, Search, MoreHorizontal, Copy, Download, Pencil, AlertTriangle } from 'lucide-react';
+import { ConfirmModal } from './ui/ConfirmModal';
 import { db } from '../firebase';
 import { doc, setDoc, collection } from 'firebase/firestore';
 import toast from 'react-hot-toast';
-import { motion } from 'motion/react';
+import { motion, AnimatePresence } from 'motion/react';
+import { useBreakpoint } from '../hooks/useBreakpoint';
 
-const ProjectDirectory = ({ projects, setProjects, userRole, selectedProjectId, enrolledProjectIds, onOpenWorkspace }: any) => {
+const ProjectDirectory = ({ projects, setProjects, userRole, selectedProjectId, enrolledProjectIds, onOpenWorkspace, onDeleteProject, isDarkMode }: any) => {
   const [editingProjectId, setEditingProjectId] = useState<string | null>(null);
   const [editData, setEditData] = useState<any>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
+  const [projectToDelete, setProjectToDelete] = useState<string | null>(null);
   const [expandedProjects, setExpandedProjects] = useState<{ [key: string]: boolean }>({});
   const projectRefs = useRef<{ [key: string]: HTMLDivElement | null }>({});
+  const { isMobile, isTablet } = useBreakpoint();
 
   useEffect(() => {
     if (selectedProjectId && projectRefs.current[selectedProjectId]) {
@@ -31,7 +35,7 @@ const ProjectDirectory = ({ projects, setProjects, userRole, selectedProjectId, 
 
   const displayProjects = projects.filter((p: any) => 
     (!enrolledProjectIds || enrolledProjectIds.includes(p.id)) &&
-    p.name.toLowerCase().includes(searchQuery.toLowerCase())
+    (p.name || '').toLowerCase().includes((searchQuery || '').toLowerCase())
   );
 
   const handleEdit = (project: any) => {
@@ -39,93 +43,20 @@ const ProjectDirectory = ({ projects, setProjects, userRole, selectedProjectId, 
     setEditData(JSON.parse(JSON.stringify(project))); // Deep copy to avoid mutating original state directly
   };
 
-  const handleSave = () => {
-    setProjects(projects.map((p: any) => p.id === editingProjectId ? editData : p));
-    setEditingProjectId(null);
-    setEditData(null);
-  };
-
-  const addSection = (projectId: string) => {
-    if (editingProjectId === projectId) {
-      setEditData({
-        ...editData,
-        sections: [...(editData.sections || []), { id: Date.now().toString(), name: 'Nueva Sección', description: '', color: '#6366f1', links: [] }]
-      });
-    } else {
-      setProjects(projects.map((p: any) => {
-        if (p.id === projectId) {
-          return { ...p, sections: [...(p.sections || []), { id: Date.now().toString(), name: 'Nueva Sección', description: '', color: '#6366f1', links: [] }] };
-        }
-        return p;
-      }));
+  const handleSave = async () => {
+    try {
+      const projectRef = doc(db, 'projects', editingProjectId!);
+      await setDoc(projectRef, editData, { merge: true });
+      setProjects(projects.map((p: any) => p.id === editingProjectId ? editData : p));
+      setEditingProjectId(null);
+      setEditData(null);
+      toast.success('Proyecto actualizado');
+    } catch (error) {
+      console.error("Error updating project:", error);
+      toast.error('Error al actualizar proyecto');
+      const { handleFirestoreError, OperationType } = await import('../firebase');
+      handleFirestoreError(error, OperationType.UPDATE, `projects/${editingProjectId}`);
     }
-  };
-
-  const addLink = (projectId: string, sectionId: string) => {
-    if (editingProjectId === projectId) {
-      setEditData({
-        ...editData,
-        sections: editData.sections.map((s: any) => s.id === sectionId ? { ...s, links: [...(s.links || []), { name: 'Nuevo Enlace', url: 'https://' }] } : s)
-      });
-    } else {
-      const linkName = prompt('Nombre del enlace:');
-      const linkUrl = prompt('URL del enlace:');
-      if (linkName && linkUrl) {
-        setProjects(projects.map((p: any) => {
-          if (p.id === projectId) {
-            return {
-              ...p,
-              sections: p.sections.map((s: any) => s.id === sectionId ? { ...s, links: [...(s.links || []), { name: linkName, url: linkUrl }] } : s)
-            };
-          }
-          return p;
-        }));
-      }
-    }
-  };
-
-  const updateSection = (sectionId: string, field: string, value: string) => {
-    setEditData({
-      ...editData,
-      sections: editData.sections.map((s: any) => s.id === sectionId ? { ...s, [field]: value } : s)
-    });
-  };
-
-  const removeSection = (sectionId: string) => {
-    if (confirm('¿Estás seguro de eliminar esta sección?')) {
-      setEditData({
-        ...editData,
-        sections: editData.sections.filter((s: any) => s.id !== sectionId)
-      });
-    }
-  };
-
-  const updateLink = (sectionId: string, linkIndex: number, field: string, value: string) => {
-    setEditData({
-      ...editData,
-      sections: editData.sections.map((s: any) => {
-        if (s.id === sectionId) {
-          const newLinks = [...s.links];
-          newLinks[linkIndex] = { ...newLinks[linkIndex], [field]: value };
-          return { ...s, links: newLinks };
-        }
-        return s;
-      })
-    });
-  };
-
-  const removeLink = (sectionId: string, linkIndex: number) => {
-    setEditData({
-      ...editData,
-      sections: editData.sections.map((s: any) => {
-        if (s.id === sectionId) {
-          const newLinks = [...s.links];
-          newLinks.splice(linkIndex, 1);
-          return { ...s, links: newLinks };
-        }
-        return s;
-      })
-    });
   };
 
   const loadExampleProject = async () => {
@@ -143,7 +74,8 @@ const ProjectDirectory = ({ projects, setProjects, userRole, selectedProjectId, 
         name: 'Ejemplo CPM (Construcción)',
         color: '#ef4444',
         description: 'Proyecto de ejemplo para demostrar la Ruta Crítica (CPM).',
-        sections: []
+        createdAt: new Date().toISOString(),
+        createdBy: 'admin'
       };
       
       // Add to local state
@@ -227,133 +159,89 @@ const ProjectDirectory = ({ projects, setProjects, userRole, selectedProjectId, 
   };
 
   return (
-    <div className="p-6 space-y-8">
-      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
-        <h2 className="text-3xl font-black text-slate-900 tracking-tighter">Directorio de Proyectos</h2>
-        <div className="flex flex-col sm:flex-row items-center gap-4 w-full sm:w-auto">
-          <div className="relative w-full sm:w-64">
-            <Search size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+    <div className={`p-4 sm:p-6 lg:p-8 space-y-6 sm:space-y-8 ${isTablet ? 'max-w-6xl mx-auto' : ''}`}>
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 sm:gap-6">
+        <div className="space-y-1">
+          <h2 className={`text-2xl sm:text-3xl lg:text-4xl font-black tracking-tighter ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>Directorio de Proyectos</h2>
+          <p className={`text-[9px] sm:text-[10px] font-black uppercase tracking-[0.2em] ${isDarkMode ? 'text-gray-500' : 'text-slate-400'}`}>Gestión y Seguimiento de Iniciativas</p>
+        </div>
+        <div className="flex flex-col xs:flex-row items-center gap-3 w-full sm:w-auto">
+          <div className="relative w-full sm:w-48 md:w-64 lg:w-72 group">
+            <Search size={18} className={`absolute left-4 top-1/2 -translate-y-1/2 transition-colors ${isDarkMode ? 'text-gray-600 group-focus-within:text-indigo-400' : 'text-slate-400 group-focus-within:text-indigo-500'}`} />
             <input 
               type="text"
               placeholder="Buscar proyecto..." 
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full pl-10 pr-4 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none text-sm"
+              className={`w-full pl-12 pr-4 py-3 border rounded-2xl focus:ring-4 focus:ring-indigo-500/10 focus:border-indigo-500 outline-none text-sm font-bold transition-all ${isDarkMode ? 'bg-white/5 border-white/10 text-white placeholder:text-gray-600' : 'bg-white border-slate-200 text-slate-900 shadow-sm'}`}
             />
           </div>
           {userRole === 'admin' && (
             <button 
-              onClick={loadExampleProject}
-              className="bg-indigo-50 text-indigo-600 hover:bg-indigo-100 px-4 py-2 rounded-xl font-bold text-sm transition-colors flex items-center gap-2 whitespace-nowrap"
+              onClick={() => {
+                const newProjectId = `p-${Date.now()}`;
+                const newProject = {
+                  id: newProjectId,
+                  name: 'Nuevo Proyecto',
+                  color: '#6366f1',
+                  description: '',
+                  createdAt: new Date().toISOString(),
+                  createdBy: 'admin'
+                };
+                setProjects([...projects, newProject]);
+                setDoc(doc(db, 'projects', newProjectId), newProject);
+                toast.success('Proyecto creado');
+              }}
+              className="w-full sm:w-auto bg-indigo-600 text-white px-5 py-3 rounded-2xl flex items-center justify-center gap-2 font-black text-[10px] sm:text-xs uppercase tracking-widest shadow-xl shadow-indigo-600/30 hover:bg-indigo-700 transition-all active:scale-95 whitespace-nowrap"
             >
-              <PlayCircle size={18} /> Cargar Ejemplo CPM
+              <Plus size={18} /> <span className={isTablet ? 'hidden md:inline' : 'inline'}>Nuevo Proyecto</span>
+              {isTablet && <span className="md:hidden">Nuevo</span>}
             </button>
           )}
         </div>
       </div>
       {displayProjects.length === 0 ? (
-        <div className="text-center py-10 bg-white rounded-2xl border border-slate-100">
-          <p className="text-slate-500 font-medium">
+        <div className={`text-center py-10 rounded-2xl border ${isDarkMode ? 'bg-white/5 border-white/5' : 'bg-white border-slate-100'}`}>
+          <p className={`font-medium ${isDarkMode ? 'text-gray-500' : 'text-slate-500'}`}>
             {searchQuery ? "No se encontraron proyectos con ese nombre" : "No estás enrolado en ningún proyecto actualmente."}
           </p>
         </div>
       ) : (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-6">
           {displayProjects.map((project: any) => (
             <div 
               key={project.id} 
               ref={el => { projectRefs.current[project.id] = el; }}
-              className={`bg-white p-6 rounded-3xl shadow-sm border transition-all duration-300 flex flex-col overflow-hidden ${expandedProjects[project.id] ? 'h-auto' : 'h-64'} ${selectedProjectId === project.id ? 'border-indigo-500 ring-4 ring-indigo-50' : 'border-slate-200 hover:border-indigo-200 hover:shadow-md'}`}
+              className={`p-5 sm:p-6 rounded-3xl shadow-sm border transition-all duration-300 flex flex-col overflow-hidden h-64 sm:h-72 ${selectedProjectId === project.id ? 'border-indigo-500 ring-4 ring-indigo-500/20' : (isDarkMode ? 'bg-[#1a1a1a] border-white/5 hover:border-white/10' : 'bg-white border-slate-200 hover:border-indigo-200 hover:shadow-md')}`}
             >
               {editingProjectId === project.id ? (
-                <div className="space-y-6 flex flex-col h-full">
-                  <div className="flex justify-between items-center mb-2">
-                    <h3 className="text-lg font-black text-slate-900 flex items-center gap-2"><Edit2 size={18} className="text-indigo-500"/> Editar Proyecto</h3>
-                    <button onClick={() => setEditingProjectId(null)} className="text-slate-400 hover:text-slate-600 bg-slate-50 hover:bg-slate-100 p-2 rounded-xl transition-colors"><X size={18} /></button>
+                <div className="space-y-4 sm:space-y-6 flex flex-col h-full">
+                  <div className="flex justify-between items-center mb-1">
+                    <h3 className={`text-lg font-black flex items-center gap-2 ${isDarkMode ? 'text-white' : 'text-slate-900'}`}><Edit2 size={18} className="text-indigo-500"/> Editar Proyecto</h3>
+                    <button onClick={() => setEditingProjectId(null)} className={`p-2 rounded-xl transition-colors ${isDarkMode ? 'text-gray-500 hover:text-white hover:bg-white/5' : 'text-slate-400 hover:text-slate-600 bg-slate-50 hover:bg-slate-100'}`}><X size={18} /></button>
                   </div>
                   
-                  <div className="space-y-4 bg-slate-50 p-4 rounded-2xl border border-slate-100">
+                  <div className={`p-4 rounded-2xl border flex-1 overflow-y-auto ${isDarkMode ? 'bg-white/5 border-white/5' : 'bg-slate-50 border-slate-100'}`}>
                     <div>
-                      <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 ml-1">Nombre</label>
-                      <input value={editData.name} onChange={e => setEditData({...editData, name: e.target.value})} className="w-full p-3 bg-white border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none font-bold text-sm shadow-sm" />
+                      <label className={`block text-[10px] font-black uppercase tracking-widest mb-1 ml-1 ${isDarkMode ? 'text-gray-500' : 'text-slate-400'}`}>Color</label>
+                      <input 
+                        type="color" 
+                        value={editData.color || '#6366f1'} 
+                        onChange={e => setEditData({...editData, color: e.target.value})} 
+                        className={`w-full h-10 p-1 border rounded-xl cursor-pointer ${isDarkMode ? 'bg-white/5 border-white/10' : 'bg-white border-slate-200'}`} 
+                      />
                     </div>
-                    <div>
-                      <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 ml-1">Descripción</label>
-                      <textarea value={editData.description} onChange={e => setEditData({...editData, description: e.target.value})} className="w-full p-3 bg-white border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none text-sm shadow-sm" rows={2} />
+                    <div className="mt-4">
+                      <label className={`block text-[10px] font-black uppercase tracking-widest mb-1 ml-1 ${isDarkMode ? 'text-gray-500' : 'text-slate-400'}`}>Nombre</label>
+                      <input value={editData.name} onChange={e => setEditData({...editData, name: e.target.value})} className={`w-full p-3 border rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none font-bold text-sm shadow-sm transition-colors ${isDarkMode ? 'bg-white/5 border-white/10 text-white' : 'bg-white border-slate-200 text-slate-900'}`} />
+                    </div>
+                    <div className="mt-4">
+                      <label className={`block text-[10px] font-black uppercase tracking-widest mb-1 ml-1 ${isDarkMode ? 'text-gray-500' : 'text-slate-400'}`}>Descripción</label>
+                      <textarea value={editData.description} onChange={e => setEditData({...editData, description: e.target.value})} className={`w-full p-3 border rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none text-sm shadow-sm resize-none transition-colors ${isDarkMode ? 'bg-white/5 border-white/10 text-white' : 'bg-white border-slate-200 text-slate-900'}`} rows={3} />
                     </div>
                   </div>
 
-                  <div className="space-y-4 flex-1">
-                    <div className="flex justify-between items-center">
-                      <h4 className="font-black text-slate-800 text-sm">Secciones</h4>
-                      <button onClick={() => addSection(project.id)} className="text-[10px] bg-indigo-100 text-indigo-700 px-3 py-1.5 rounded-lg flex items-center gap-1 font-black uppercase tracking-wider hover:bg-indigo-200 transition-colors"><Plus size={14} /> Sección</button>
-                    </div>
-                    
-                    <div className="space-y-4">
-                      {(editData.sections || []).map((section: any) => (
-                        <div key={section.id} className="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm space-y-4">
-                          <div className="flex justify-between items-start gap-3">
-                            <div className="flex-1 space-y-3">
-                              <div className="flex items-center gap-2">
-                                <input 
-                                  type="color" 
-                                  value={section.color || '#6366f1'} 
-                                  onChange={e => updateSection(section.id, 'color', e.target.value)} 
-                                  className="w-8 h-8 p-0.5 border border-slate-200 rounded-lg cursor-pointer shrink-0" 
-                                  title="Color"
-                                />
-                                <input 
-                                  value={section.name} 
-                                  onChange={e => updateSection(section.id, 'name', e.target.value)} 
-                                  className="flex-1 p-2 bg-slate-50 border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none font-bold text-sm" 
-                                  placeholder="Nombre de la sección"
-                                />
-                              </div>
-                              <input 
-                                value={section.description || ''} 
-                                onChange={e => updateSection(section.id, 'description', e.target.value)} 
-                                className="w-full p-2 bg-slate-50 border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none text-xs" 
-                                placeholder="Descripción (opcional)"
-                              />
-                            </div>
-                            <button onClick={() => removeSection(section.id)} className="text-red-400 hover:text-red-600 hover:bg-red-50 p-2 rounded-xl transition-colors shrink-0"><Trash2 size={16} /></button>
-                          </div>
-
-                          <div className="pl-2 border-l-2 border-slate-100 space-y-2">
-                            <div className="flex justify-between items-center mb-2">
-                              <h5 className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Enlaces</h5>
-                              <button onClick={() => addLink(project.id, section.id)} className="text-[10px] text-indigo-600 flex items-center gap-1 hover:underline font-bold"><Plus size={12} /> Añadir</button>
-                            </div>
-                            
-                            {section.links.map((link: any, idx: number) => (
-                              <div key={idx} className="flex flex-col sm:flex-row items-start sm:items-center gap-2 bg-slate-50 p-2 rounded-xl border border-slate-100">
-                                <div className="flex items-center gap-2 w-full sm:w-auto flex-1">
-                                  <FileText size={14} className="text-slate-400 shrink-0 ml-1" />
-                                  <input 
-                                    value={link.name} 
-                                    onChange={e => updateLink(section.id, idx, 'name', e.target.value)} 
-                                    className="w-full p-1.5 bg-white border border-slate-200 rounded-lg text-xs focus:ring-1 focus:ring-indigo-500 outline-none font-medium" 
-                                    placeholder="Nombre"
-                                  />
-                                </div>
-                                <div className="flex items-center gap-2 w-full sm:w-auto flex-1">
-                                  <input 
-                                    value={link.url} 
-                                    onChange={e => updateLink(section.id, idx, 'url', e.target.value)} 
-                                    className="w-full p-1.5 bg-white border border-slate-200 rounded-lg text-xs focus:ring-1 focus:ring-indigo-500 outline-none" 
-                                    placeholder="https://..."
-                                  />
-                                  <button onClick={() => removeLink(section.id, idx)} className="text-slate-400 hover:text-red-500 p-1.5 hover:bg-red-50 rounded-lg shrink-0"><X size={14} /></button>
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-
-                  <div className="mt-auto pt-4 border-t border-slate-100 shrink-0">
+                  <div className={`mt-auto pt-4 border-t shrink-0 ${isDarkMode ? 'border-white/5' : 'border-slate-100'}`}>
                     <button onClick={handleSave} className="w-full bg-indigo-600 hover:bg-indigo-700 text-white px-6 py-3 rounded-xl flex items-center justify-center gap-2 font-black text-xs uppercase tracking-widest transition-all shadow-lg shadow-indigo-500/30">
                       <Save size={16} /> Guardar Cambios
                     </button>
@@ -363,50 +251,82 @@ const ProjectDirectory = ({ projects, setProjects, userRole, selectedProjectId, 
                 <>
                   <div className="flex justify-between items-start gap-4 mb-4 shrink-0">
                     <div className="flex items-start gap-3 min-w-0">
-                      <div className="w-10 h-10 rounded-xl shrink-0 mt-1 shadow-sm" style={{ backgroundColor: project.color || '#6366f1' }}></div>
+                      <div className="w-12 h-12 rounded-2xl shrink-0 mt-1 shadow-sm flex items-center justify-center text-white font-black text-xl" style={{ backgroundColor: project.color || '#6366f1' }}>
+                        {project.name.charAt(0)}
+                      </div>
                       <div className="min-w-0">
-                        <h3 className="text-xl font-black text-slate-900 break-words leading-tight line-clamp-1">{project.name}</h3>
-                        <p className="text-xs text-slate-400 mt-0.5">
-                          {project.sections?.length || 0} seccion{(project.sections?.length !== 1) ? 'es' : ''}
-                          {project.tasks?.filter((t: any) => t.slack === 0).length > 0 && ` · ${project.tasks.filter((t: any) => t.slack === 0).length} críticas 🔴`}
-                        </p>
-                        <p className="text-sm text-slate-500 mt-1 break-words line-clamp-2">{project.description}</p>
+                        <h3 className={`text-lg sm:text-xl font-black break-words leading-tight line-clamp-1 ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>{project.name}</h3>
+                        <div className="flex items-center gap-2 mt-1">
+                          <span className={`text-[10px] font-black uppercase tracking-widest ${isDarkMode ? 'text-gray-500' : 'text-slate-400'}`}>
+                            {project.tasks?.length || 0} tareas
+                          </span>
+                          {project.tasks?.filter((t: any) => t.slack === 0).length > 0 && (
+                            <span className="text-[10px] font-black text-red-500 uppercase tracking-widest flex items-center gap-1">
+                              · {project.tasks.filter((t: any) => t.slack === 0).length} críticas 🔴
+                            </span>
+                          )}
+                        </div>
                       </div>
                     </div>
                     {userRole !== 'user' && (
                       <div className="relative project-menu-container">
-                        <button onClick={() => setOpenMenuId(openMenuId === project.id ? null : project.id)} className="text-slate-400 hover:text-indigo-600 bg-slate-50 hover:bg-indigo-50 p-2 rounded-xl transition-colors shrink-0">
+                        <button 
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setOpenMenuId(openMenuId === project.id ? null : project.id);
+                          }} 
+                          className={`p-2 rounded-xl transition-colors shrink-0 ${isDarkMode ? 'text-gray-500 hover:text-white hover:bg-white/5' : 'text-slate-400 hover:text-indigo-600 bg-slate-50 hover:bg-indigo-50'}`}
+                        >
                           <MoreHorizontal size={18} />
                         </button>
                         {openMenuId === project.id && (
-                          <div className="absolute right-0 top-full mt-2 w-48 bg-white rounded-xl shadow-xl border border-slate-100 py-2 z-50">
-                            <button onClick={() => { handleEdit(project); setOpenMenuId(null); }} className="w-full text-left px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 flex items-center gap-2">
+                          <div className={`absolute right-0 top-full mt-2 w-48 rounded-xl shadow-xl border py-2 z-50 ${isDarkMode ? 'bg-[#2a2a2a] border-white/10' : 'bg-white border-slate-100'}`}>
+                            <button 
+                              onClick={(e) => { 
+                                e.stopPropagation();
+                                handleEdit(project); 
+                                setOpenMenuId(null); 
+                              }} 
+                              className={`w-full text-left px-4 py-2 text-sm flex items-center gap-2 ${isDarkMode ? 'text-gray-300 hover:bg-white/5' : 'text-slate-700 hover:bg-slate-50'}`}
+                            >
                               <Pencil size={14} /> Editar
                             </button>
-                            <button onClick={() => { 
-                              const newProject = { ...project, id: `p-${Date.now()}`, name: `${project.name} (Copia)` };
-                              setProjects([...projects, newProject]);
-                              setOpenMenuId(null); 
-                            }} className="w-full text-left px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 flex items-center gap-2">
+                            <button 
+                              onClick={(e) => { 
+                                e.stopPropagation();
+                                const newProject = { ...project, id: `p-${Date.now()}`, name: `${project.name} (Copia)` };
+                                setProjects([...projects, newProject]);
+                                setOpenMenuId(null); 
+                              }} 
+                              className={`w-full text-left px-4 py-2 text-sm flex items-center gap-2 ${isDarkMode ? 'text-gray-300 hover:bg-white/5' : 'text-slate-700 hover:bg-slate-50'}`}
+                            >
                               <Copy size={14} /> Duplicar
                             </button>
-                            <button onClick={() => { 
-                              const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(project));
-                              const downloadAnchorNode = document.createElement('a');
-                              downloadAnchorNode.setAttribute("href",     dataStr);
-                              downloadAnchorNode.setAttribute("download", project.name + ".json");
-                              document.body.appendChild(downloadAnchorNode);
-                              downloadAnchorNode.click();
-                              downloadAnchorNode.remove();
-                              setOpenMenuId(null); 
-                            }} className="w-full text-left px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 flex items-center gap-2">
+                            <button 
+                              onClick={(e) => { 
+                                e.stopPropagation();
+                                const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(project));
+                                const downloadAnchorNode = document.createElement('a');
+                                downloadAnchorNode.setAttribute("href",     dataStr);
+                                downloadAnchorNode.setAttribute("download", project.name + ".json");
+                                document.body.appendChild(downloadAnchorNode);
+                                downloadAnchorNode.click();
+                                downloadAnchorNode.remove();
+                                setOpenMenuId(null); 
+                              }} 
+                              className={`w-full text-left px-4 py-2 text-sm flex items-center gap-2 ${isDarkMode ? 'text-gray-300 hover:bg-white/5' : 'text-slate-700 hover:bg-slate-50'}`}
+                            >
                               <Download size={14} /> Exportar
                             </button>
-                            <div className="h-px bg-slate-100 my-1"></div>
-                            <button onClick={() => { 
-                              setProjects(projects.filter((p: any) => p.id !== project.id));
-                              setOpenMenuId(null); 
-                            }} className="w-full text-left px-4 py-2 text-sm text-red-600 hover:bg-red-50 flex items-center gap-2 font-medium">
+                            <div className={`h-px my-1 ${isDarkMode ? 'bg-white/5' : 'bg-slate-100'}`}></div>
+                            <button 
+                              onClick={(e) => { 
+                                e.stopPropagation();
+                                setProjectToDelete(project.id);
+                                setOpenMenuId(null);
+                              }} 
+                              className={`w-full text-left px-4 py-2 text-sm flex items-center gap-2 font-medium ${isDarkMode ? 'text-red-400 hover:bg-red-500/10' : 'text-red-600 hover:bg-red-50'}`}
+                            >
                               <Trash2 size={14} /> Eliminar
                             </button>
                           </div>
@@ -415,98 +335,19 @@ const ProjectDirectory = ({ projects, setProjects, userRole, selectedProjectId, 
                     )}
                   </div>
 
-                  <div className="flex-1 my-4 flex flex-col overflow-y-auto pr-2 custom-scrollbar">
-                    {(!project.sections || project.sections.length === 0) ? (
-                      <button 
-                        onClick={() => handleEdit(project)}
-                        className="w-full border-2 border-dashed border-slate-200 rounded-xl py-6 text-slate-400 hover:border-indigo-400 hover:text-indigo-500 transition-colors text-sm font-medium mt-2"
-                      >
-                        + Agregar primera sección
-                      </button>
-                    ) : (
-                      <div className="space-y-4">
-                        {project.sections.slice(0, 3).map((section: any) => (
-                          <div key={section.id} className="bg-slate-50 rounded-2xl p-4 border border-slate-100">
-                            <div className="flex items-center gap-3 mb-3">
-                              <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0 shadow-sm" style={{ backgroundColor: section.color || '#6366f1' }}>
-                                <Folder size={16} className="text-white" />
-                              </div>
-                              <div className="min-w-0">
-                                <h4 className="font-bold text-slate-800 text-sm break-words">{section.name}</h4>
-                                {section.description && <p className="text-[10px] text-slate-500 break-words leading-tight mt-0.5">{section.description}</p>}
-                              </div>
-                            </div>
-                            <div className="space-y-2 pl-11">
-                              {section.links.map((link: any, idx: number) => (
-                                <a key={idx} href={link.url} target="_blank" rel="noopener noreferrer" className="group flex items-center gap-2 text-xs font-medium text-slate-600 hover:text-indigo-600 transition-colors bg-white p-2 rounded-xl border border-slate-100 hover:border-indigo-100 shadow-sm">
-                                  <div className="bg-slate-100 group-hover:bg-indigo-100 p-1.5 rounded-lg text-slate-400 group-hover:text-indigo-500 transition-colors shrink-0">
-                                    <FileText size={14} />
-                                  </div>
-                                  <span className="truncate flex-1">{link.name}</span>
-                                  <ExternalLink size={12} className="opacity-0 group-hover:opacity-100 transition-opacity shrink-0" />
-                                </a>
-                              ))}
-                              {section.links.length === 0 && <p className="text-[10px] text-slate-400 italic">Sin enlaces</p>}
-                            </div>
-                          </div>
-                        ))}
-                        
-                        {project.sections.length > 3 && (
-                          <>
-                            <motion.div 
-                              initial="collapsed"
-                              animate={expandedProjects[project.id] ? "expanded" : "collapsed"}
-                              variants={{
-                                collapsed: { height: 0, opacity: 0, overflow: 'hidden' },
-                                expanded: { height: "auto", opacity: 1, overflow: 'visible' }
-                              }}
-                              transition={{ duration: 0.3, ease: "easeInOut" }}
-                              className="space-y-4"
-                            >
-                              {project.sections.slice(3).map((section: any) => (
-                                <div key={section.id} className="bg-slate-50 rounded-2xl p-4 border border-slate-100">
-                                  <div className="flex items-center gap-3 mb-3">
-                                    <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0 shadow-sm" style={{ backgroundColor: section.color || '#6366f1' }}>
-                                      <Folder size={16} className="text-white" />
-                                    </div>
-                                    <div className="min-w-0">
-                                      <h4 className="font-bold text-slate-800 text-sm break-words">{section.name}</h4>
-                                      {section.description && <p className="text-[10px] text-slate-500 break-words leading-tight mt-0.5">{section.description}</p>}
-                                    </div>
-                                  </div>
-                                  <div className="space-y-2 pl-11">
-                                    {section.links.map((link: any, idx: number) => (
-                                      <a key={idx} href={link.url} target="_blank" rel="noopener noreferrer" className="group flex items-center gap-2 text-xs font-medium text-slate-600 hover:text-indigo-600 transition-colors bg-white p-2 rounded-xl border border-slate-100 hover:border-indigo-100 shadow-sm">
-                                        <div className="bg-slate-100 group-hover:bg-indigo-100 p-1.5 rounded-lg text-slate-400 group-hover:text-indigo-500 transition-colors shrink-0">
-                                          <FileText size={14} />
-                                        </div>
-                                        <span className="truncate flex-1">{link.name}</span>
-                                        <ExternalLink size={12} className="opacity-0 group-hover:opacity-100 transition-opacity shrink-0" />
-                                      </a>
-                                    ))}
-                                    {section.links.length === 0 && <p className="text-[10px] text-slate-400 italic">Sin enlaces</p>}
-                                  </div>
-                                </div>
-                              ))}
-                            </motion.div>
-                            <button 
-                              onClick={() => setExpandedProjects(prev => ({ ...prev, [project.id]: !prev[project.id] }))}
-                              className="text-indigo-600 font-medium text-sm w-full text-center py-2 hover:bg-indigo-50 rounded-xl transition-colors"
-                            >
-                              {expandedProjects[project.id] ? "Ver menos ▴" : `+ Ver ${project.sections.length - 3} secciones más ▾`}
-                            </button>
-                          </>
-                        )}
-                      </div>
-                    )}
+                  <div className="flex-1 my-2">
+                    <p className={`text-xs sm:text-sm line-clamp-4 leading-relaxed ${isDarkMode ? 'text-gray-400' : 'text-slate-500'}`}>
+                      {project.description || "Sin descripción disponible."}
+                    </p>
                   </div>
 
-                  <div className="mt-auto pt-4 border-t border-slate-100 shrink-0">
+                  <div className={`mt-auto pt-4 border-t shrink-0 ${isDarkMode ? 'border-white/5' : 'border-slate-100'}`}>
                     <button 
                       onClick={() => onOpenWorkspace(project.id)}
-                      className="w-full bg-indigo-50 text-indigo-600 hover:bg-indigo-600 hover:text-white px-4 py-3 rounded-xl font-black text-xs uppercase tracking-widest transition-all flex items-center justify-center gap-2"
+                      className={`w-full px-4 py-3 rounded-xl font-black text-[10px] sm:text-xs uppercase tracking-widest transition-all flex items-center justify-center gap-2 group ${isDarkMode ? 'bg-white/5 text-white hover:bg-indigo-600' : 'bg-indigo-50 text-indigo-600 hover:bg-indigo-600 hover:text-white'}`}
                     >
-                      Espacio de Trabajo <ChevronRight size={16} />
+                      Espacio de Trabajo 
+                      <ChevronRight size={16} className="group-hover:translate-x-1 transition-transform" />
                     </button>
                   </div>
                 </>
@@ -515,6 +356,23 @@ const ProjectDirectory = ({ projects, setProjects, userRole, selectedProjectId, 
           ))}
         </div>
       )}
+      {/* Delete Confirmation Modal */}
+      <AnimatePresence>
+        <ConfirmModal
+          isOpen={!!projectToDelete}
+          onClose={() => setProjectToDelete(null)}
+          onConfirm={() => {
+            if (projectToDelete) {
+              onDeleteProject(projectToDelete);
+              setProjectToDelete(null);
+            }
+          }}
+          title="¿Eliminar Proyecto?"
+          message="¿Estás seguro de que deseas eliminar este proyecto? Esta acción no se puede deshacer y se eliminarán todas las tareas y recursos asociados."
+          confirmText="Eliminar Proyecto"
+          isDarkMode={isDarkMode}
+        />
+      </AnimatePresence>
     </div>
   );
 };

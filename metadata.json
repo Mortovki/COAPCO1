@@ -1,5 +1,5 @@
 {
   "name": "Asistencia Prestadores",
-  "description": "Sistema de control de asistencia y seguimiento de horas para prestadores de servicio social y brigadistas.",
+  "description": "Sistema de gestión de proyectos con tableros Kanban, diagramas de Gantt, análisis de ruta crítica y seguimiento de tareas para prestadores de servicio social.",
   "requestFramePermissions": []
 }

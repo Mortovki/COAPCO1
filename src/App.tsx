@@ -2,72 +2,35 @@ import * as React from 'react';
 import { useState, useMemo, useEffect, useRef, Component } from 'react';
 import { createPortal } from 'react-dom';
 import { onAuthStateChanged } from 'firebase/auth';
-import { auth, db } from './firebase';
-import { doc, getDoc, setDoc, deleteDoc, getDocFromServer, getDocs, collection } from 'firebase/firestore';
+import { auth, db, handleFirestoreError, OperationType } from './firebase';
+import { doc, getDoc, setDoc, deleteDoc, getDocFromServer, getDocs, collection, query, orderBy, limit, onSnapshot, where, writeBatch } from 'firebase/firestore';
 import Login from './components/Login';
 import ProfileForm from './components/ProfileForm';
 import { AdminValidation } from './components/AdminValidation';
 import ProjectDirectory from './components/ProjectDirectory';
 import ProjectWorkspace from './components/ProjectWorkspace';
-import { Users, PlusCircle, Clock, Calendar as CalendarIcon, CheckCircle2, XCircle, AlertCircle, History, Trash2, Edit2, ChevronRight, ChevronLeft, ArrowLeft, UserPlus, Tag, LayoutDashboard, CalendarDays, ExternalLink, Link as LinkIcon, Phone, Mail, GraduationCap, Briefcase, Plus, Filter, Search, Check, X, List, LayoutGrid, Download, RefreshCw, BarChart3, AlertTriangle, CheckSquare, ArrowDownUp, Folder, Send, Shield, ShieldOff } from 'lucide-react';
+import SkillsView from './components/SkillsView';
+import { notifyProjectDeleted, getProjectAdmins } from './services/notificationService';
+import { Users, PlusCircle, Clock, Calendar as CalendarIcon, CheckCircle2, XCircle, AlertCircle, History, Trash2, Edit2, ChevronRight, ChevronLeft, ArrowLeft, UserPlus, Tag, LayoutDashboard, CalendarDays, ExternalLink, Link as LinkIcon, Phone, Mail, GraduationCap, Briefcase, Plus, Filter, Search, Check, X, List, LayoutGrid, Download, RefreshCw, BarChart3, AlertTriangle, CheckSquare, ArrowDownUp, Folder, Send, Shield, ShieldOff, Menu, Settings, Bell, Sun, Moon } from 'lucide-react';
 import { useForm, Controller } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import * as z from 'zod';
 import toast, { Toaster } from 'react-hot-toast';
+import { NotificationCenter } from './components/NotificationCenter';
+import { useNotifications } from './hooks/useNotifications';
+import { useBreakpoint } from './hooks/useBreakpoint';
+import { motion, AnimatePresence } from 'motion/react';
+import { ConfirmModal } from './components/ui/ConfirmModal';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell, LineChart, Line } from 'recharts';
 
+import { ProfileSkillMap } from './components/ProfileSkillMap';
+import { dedupeById } from './utils/dedupe';
+import { SkillMap } from './components/SkillMap/SkillMap';
+import { SkillEditor } from './components/SkillEditor';
+import { SkillMapUser, SkillRating } from './types/skills';
+import { PREDEFINED_SKILLS } from './constants/skills';
+
 const TOTAL_REQUIRED_HOURS = 480;
-
-export enum OperationType {
-  CREATE = 'create',
-  UPDATE = 'update',
-  DELETE = 'delete',
-  LIST = 'list',
-  GET = 'get',
-  WRITE = 'write',
-}
-
-export interface FirestoreErrorInfo {
-  error: string;
-  operationType: OperationType;
-  path: string | null;
-  authInfo: {
-    userId: string | undefined;
-    email: string | null | undefined;
-    emailVerified: boolean | undefined;
-    isAnonymous: boolean | undefined;
-    tenantId: string | null | undefined;
-    providerInfo: {
-      providerId: string;
-      displayName: string | null;
-      email: string | null;
-      photoUrl: string | null;
-    }[];
-  }
-}
-
-export function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
-  const errInfo: FirestoreErrorInfo = {
-    error: error instanceof Error ? error.message : String(error),
-    authInfo: {
-      userId: auth.currentUser?.uid,
-      email: auth.currentUser?.email,
-      emailVerified: auth.currentUser?.emailVerified,
-      isAnonymous: auth.currentUser?.isAnonymous,
-      tenantId: auth.currentUser?.tenantId,
-      providerInfo: auth.currentUser?.providerData.map(provider => ({
-        providerId: provider.providerId,
-        displayName: provider.displayName,
-        email: provider.email,
-        photoUrl: provider.photoURL
-      })) || []
-    },
-    operationType,
-    path
-  }
-  console.error('Firestore Error: ', JSON.stringify(errInfo));
-  throw new Error(JSON.stringify(errInfo));
-}
 
 class ErrorBoundary extends React.Component<any, any> {
   state: { hasError: boolean, error: any };
@@ -95,11 +58,11 @@ class ErrorBoundary extends React.Component<any, any> {
       }
 
       return (
-        <div className="min-h-screen flex items-center justify-center bg-slate-50 p-6">
-          <div className="bg-white p-8 rounded-[2rem] shadow-xl border border-slate-200 text-center max-w-md">
+        <div className="min-h-screen flex items-center justify-center bg-slate-50 dark:bg-[#0a0a0a] p-6 transition-colors">
+          <div className="bg-white dark:bg-[#1a1a1a] p-8 rounded-[2rem] shadow-xl border border-slate-200 dark:border-white/10 text-center max-w-md">
             <AlertTriangle className="w-16 h-16 text-red-500 mx-auto mb-4" />
-            <h2 className="text-2xl font-black text-slate-900 mb-2">¡Ups!</h2>
-            <p className="text-slate-600 mb-6">{errorMessage}</p>
+            <h2 className="text-2xl font-black text-slate-900 dark:text-white mb-2">¡Ups!</h2>
+            <p className="text-slate-600 dark:text-gray-400 mb-6">{errorMessage}</p>
             <button 
               onClick={() => window.location.reload()}
               className="px-6 py-3 bg-indigo-600 text-white rounded-xl font-bold hover:bg-indigo-700 transition-all"
@@ -240,6 +203,7 @@ const DEFAULT_PROJECTS = [
 const CAREER_OPTIONS = ['Arquitectura', 'Arquitectura del Paisaje', 'Urbanismo', 'Otro'];
 
 const getDisplayName = (student: any) => {
+  if (!student) return 'Desconocido';
   if (student.nickname) return student.nickname;
   if (student.firstName && student.lastNamePaterno) {
     const firstNames = student.firstName.trim().split(' ');
@@ -249,151 +213,293 @@ const getDisplayName = (student: any) => {
 };
 
 const getFullName = (student: any) => {
+  if (!student) return 'Desconocido';
   if (student.firstName) {
     return `${student.firstName} ${student.lastNamePaterno} ${student.lastNameMaterno || ''}`.trim();
   }
   return student.name || 'Desconocido';
 };
 
-const Sidebar = ({ view, setView, setEditingRecordId, userRole, setUserRole, setCurrentUserId, currentUserId, firstStudentId, user, onOpenProfile, students, projects, setSelectedProjectId, selectedProjectId }: any) => {
+const Sidebar = ({ 
+  view, 
+  setView, 
+  setEditingRecordId, 
+  userRole, 
+  setUserRole, 
+  setCurrentUserId, 
+  currentUserId, 
+  firstStudentId, 
+  user, 
+  onOpenProfile, 
+  students, 
+  projects, 
+  setSelectedProjectId, 
+  selectedProjectId, 
+  unreadNotifications, 
+  onOpenNotifications,
+  isDarkMode,
+  isMobileMenuOpen,
+  setIsMobileMenuOpen
+}: any) => {
+  const { breakpoint } = useBreakpoint();
+  const [isExpanded, setIsExpanded] = useState(false);
   const currentStudent = students.find((s: any) => s.id === currentUserId);
-  const enrolledProjects = (currentStudent?.projectIds && currentStudent.projectIds.length > 0) ? currentStudent.projectIds : ['p-general'];
+  const enrolledProjects = Array.from(new Set((currentStudent?.projectIds && currentStudent.projectIds.length > 0) ? currentStudent.projectIds : ['p-general']));
+
+  const isRail = breakpoint === 'tablet';
+  const isMobile = breakpoint === 'mobile';
+
+  const sidebarWidth = isMobile ? 'w-72' : (isRail ? (isExpanded ? 'w-64' : 'w-20') : 'w-64');
 
   return (
-  <div className="w-64 bg-slate-900 text-white flex flex-col hidden lg:flex shadow-2xl">
-    <div className="p-6 border-b border-slate-800 flex items-center gap-3">
-      <div className="bg-indigo-500 p-2 rounded-lg text-white">
-        <GraduationCap size={20} />
-      </div>
-      <h1 className="font-bold text-xs leading-tight uppercase tracking-widest text-indigo-100">Asistencia Prestadores</h1>
-    </div>
-    <div className="p-4 flex-1 space-y-2 mt-4 overflow-y-auto">
-      {userRole !== 'user' ? (
-        <>
-          <div className="mb-4">
-            <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest px-4 mb-2">Vista Admin</p>
-            <button
-              onClick={() => { toast.dismiss(); setView('dashboard'); setEditingRecordId(null); }}
-              className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${view === 'dashboard' ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/30' : 'text-slate-400 hover:text-white hover:bg-slate-800'}`}
-            >
-              <LayoutDashboard size={20} /> <span className="font-medium">Dashboard Admin</span>
-            </button>
-            <button
-              onClick={() => { toast.dismiss(); setView('validation'); setEditingRecordId(null); }}
-              className={`w-full flex items-center justify-between px-4 py-3 rounded-xl transition-all ${view === 'validation' ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/30' : 'text-slate-400 hover:text-white hover:bg-slate-800'}`}
-            >
-              <div className="flex items-center gap-3">
-                <CheckSquare size={20} /> <span className="font-medium">Validación</span>
-              </div>
-              {students.reduce((acc: number, s: any) => acc + (s.records || []).filter((r: any) => r.validationStatus === 'pendiente').length, 0) > 0 && (
-                <span className="bg-white text-indigo-600 text-[10px] font-black px-2 py-0.5 rounded-full">
-                  {students.reduce((acc: number, s: any) => acc + (s.records || []).filter((r: any) => r.validationStatus === 'pendiente').length, 0)}
-                </span>
-              )}
-            </button>
-            <button
-              onClick={() => { toast.dismiss(); setSelectedProjectId(null); setView('project-directory'); setEditingRecordId(null); }}
-              className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${view === 'project-directory' && !selectedProjectId ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/30' : 'text-slate-400 hover:text-white hover:bg-slate-800'}`}
-            >
-              <Briefcase size={20} /> <span className="font-medium">Directorio Proyectos</span>
-            </button>
-            <button
-              onClick={() => { toast.dismiss(); setView('categories'); setEditingRecordId(null); }}
-              className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${view === 'categories' ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/30' : 'text-slate-400 hover:text-white hover:bg-slate-800'}`}
-            >
-              <Tag size={20} /> <span className="font-medium">Configuración</span>
-            </button>
-          </div>
-          
-          {user?.email !== 'mortovki@gmail.com' && (
-            <div className="pt-4 border-t border-slate-800">
-              <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest px-4 mb-2">Vista Usuario</p>
-              <button
-                onClick={() => { toast.dismiss(); setView('user-dashboard'); setEditingRecordId(null); }}
-                className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${view === 'user-dashboard' ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/30' : 'text-slate-400 hover:text-white hover:bg-slate-800'}`}
-              >
-                <History size={20} /> <span className="font-medium">Mi Progreso</span>
-              </button>
-            </div>
-          )}
-        </>
-      ) : (
-        <>
-          <button
-            onClick={() => { toast.dismiss(); setView('user-dashboard'); setEditingRecordId(null); }}
-            className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${view === 'user-dashboard' ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/30' : 'text-slate-400 hover:text-white hover:bg-slate-800'}`}
-          >
-            <LayoutDashboard size={20} /> <span className="font-medium">Mi Progreso</span>
-          </button>
-          <button
-            onClick={() => { toast.dismiss(); setView('calendar'); setEditingRecordId(null); }}
-            className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${view === 'calendar' ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/30' : 'text-slate-400 hover:text-white hover:bg-slate-800'}`}
-          >
-            <CalendarDays size={20} /> <span className="font-medium">Calendario</span>
-          </button>
-          <button
-            onClick={() => { toast.dismiss(); setSelectedProjectId(null); setView('project-directory'); setEditingRecordId(null); }}
-            className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${view === 'project-directory' && !selectedProjectId ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/30' : 'text-slate-400 hover:text-white hover:bg-slate-800'}`}
-          >
-            <Briefcase size={20} /> <span className="font-medium">Directorio Proyectos</span>
-          </button>
-        </>
-      )}
+    <>
+      {/* Overlay for mobile and expanded rail on tablet */}
+      <AnimatePresence>
+        {((isMobile && isMobileMenuOpen) || (isRail && isExpanded)) && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={() => {
+              if (isMobile) setIsMobileMenuOpen(false);
+              if (isRail) setIsExpanded(false);
+            }}
+            className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[90]"
+          />
+        )}
+      </AnimatePresence>
 
-      {enrolledProjects.length > 0 && (
-        <div className="pt-4 border-t border-slate-800 mt-4">
-          <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest px-4 mb-2">Mis Proyectos</p>
-          {enrolledProjects.map((pid: string) => {
-            const project = projects.find((p: any) => p.id === pid);
-            if (!project) return null;
-            return (
-              <button
-                key={pid}
-                onClick={() => { toast.dismiss(); setSelectedProjectId(pid); setView('project-directory'); setEditingRecordId(null); }}
-                className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${view === 'project-directory' && selectedProjectId === pid ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/30' : 'text-slate-400 hover:text-white hover:bg-slate-800'}`}
-              >
-                <Folder size={18} style={{ color: view === 'project-directory' && selectedProjectId === pid ? '#fff' : project.color }} /> 
-                <span className="font-medium text-sm truncate">{project.name}</span>
-              </button>
-            );
-          })}
-        </div>
-      )}
-    </div>
-    <div className="p-6 border-t border-slate-800 space-y-4">
       <div 
-        className="flex items-center gap-3 cursor-pointer hover:bg-slate-800 p-2 rounded-xl transition-all"
-        onClick={onOpenProfile}
+        className={`
+          ${isMobile ? 'fixed inset-y-0 left-0 z-[100]' : 'relative z-[80]'}
+          ${isMobile && !isMobileMenuOpen ? '-translate-x-full' : 'translate-x-0'}
+          ${sidebarWidth} 
+          ${isDarkMode ? 'bg-[#121212] border-r border-white/10' : 'bg-slate-900'} 
+          text-white flex flex-col shadow-2xl transition-all duration-300 ease-in-out
+          ${isRail && isExpanded ? 'fixed h-full' : ''}
+        `}
       >
-        <div className="w-10 h-10 rounded-full bg-indigo-500 flex items-center justify-center font-black text-white">
-          {user?.displayName?.charAt(0) || 'U'}
+        <div className={`p-5 border-b ${isDarkMode ? 'border-white/5' : 'border-slate-800'} flex items-center justify-between`}>
+          <div className={`flex items-center min-w-0 ${isRail && !isExpanded ? 'justify-center w-full' : 'gap-3'}`}>
+            <div className="bg-indigo-500 p-2 rounded-xl text-white flex-shrink-0 shadow-lg shadow-indigo-500/20">
+              <GraduationCap size={20} />
+            </div>
+            {(!isRail || isExpanded) && (
+              <div className="flex flex-col min-w-0">
+                <span className="font-black text-[9px] leading-none uppercase tracking-[0.2em] text-indigo-400/80 mb-1">Asistencia</span>
+                <span className="font-black text-xs leading-none uppercase tracking-widest text-white truncate">Prestadores</span>
+              </div>
+            )}
+          </div>
+          {isMobile && (
+            <button onClick={() => setIsMobileMenuOpen(false)} className="p-2 text-slate-400 hover:text-white">
+              <X size={20} />
+            </button>
+          )}
         </div>
-        <div className="flex-1 min-w-0">
-          <p className="text-sm font-bold truncate">{user?.displayName || 'Usuario'}</p>
-          <p className="text-[10px] text-slate-500 uppercase font-black">{userRole}</p>
+
+        <div className={`p-4 flex-1 space-y-2 mt-4 overflow-y-auto ${isRail && !isExpanded ? 'flex flex-col items-center' : ''}`}>
+          {userRole !== 'user' ? (
+            <>
+              <div className="mb-4 w-full">
+                {(!isRail || isExpanded) && (
+                  <p className={`text-[10px] font-black uppercase tracking-widest px-4 mb-2 ${isDarkMode ? 'text-gray-500' : 'text-slate-500'}`}>Vista Admin</p>
+                )}
+                <SidebarItem
+                  icon={<LayoutDashboard size={20} />}
+                  label="Dashboard Admin"
+                  active={view === 'dashboard'}
+                  onClick={() => { setView('dashboard'); setEditingRecordId(null); if (isRail) setIsExpanded(false); if (isMobile) setIsMobileMenuOpen(false); }}
+                  collapsed={isRail && !isExpanded}
+                  isDarkMode={isDarkMode}
+                />
+                <SidebarItem
+                  icon={<CheckSquare size={20} />}
+                  label="Validación"
+                  active={view === 'validation'}
+                  onClick={() => { setView('validation'); setEditingRecordId(null); if (isRail) setIsExpanded(false); if (isMobile) setIsMobileMenuOpen(false); }}
+                  collapsed={isRail && !isExpanded}
+                  isDarkMode={isDarkMode}
+                />
+                <SidebarItem
+                  icon={<Briefcase size={20} />}
+                  label="Directorio Proyectos"
+                  active={view === 'project-directory'}
+                  onClick={() => { setSelectedProjectId(null); setView('project-directory'); setEditingRecordId(null); if (isRail) setIsExpanded(false); if (isMobile) setIsMobileMenuOpen(false); }}
+                  collapsed={isRail && !isExpanded}
+                  isDarkMode={isDarkMode}
+                />
+                <SidebarItem
+                  icon={<Tag size={20} />}
+                  label="Habilidades"
+                  active={view === 'skill-map'}
+                  onClick={() => { setView('skill-map'); setEditingRecordId(null); if (isRail) setIsExpanded(false); if (isMobile) setIsMobileMenuOpen(false); }}
+                  collapsed={isRail && !isExpanded}
+                  isDarkMode={isDarkMode}
+                />
+                <SidebarItem
+                  icon={<Bell size={20} />}
+                  label="Notificaciones"
+                  active={false}
+                  onClick={() => { onOpenNotifications(); if (isRail) setIsExpanded(false); if (isMobile) setIsMobileMenuOpen(false); }}
+                  collapsed={isRail && !isExpanded}
+                  badge={unreadNotifications > 0 ? unreadNotifications : undefined}
+                  isDarkMode={isDarkMode}
+                />
+                <SidebarItem
+                  icon={<Settings size={20} />}
+                  label="Configuración"
+                  active={view === 'categories'}
+                  onClick={() => { setView('categories'); setEditingRecordId(null); if (isRail) setIsExpanded(false); if (isMobile) setIsMobileMenuOpen(false); }}
+                  collapsed={isRail && !isExpanded}
+                  isDarkMode={isDarkMode}
+                />
+              </div>
+
+              {user?.email !== 'mortovki@gmail.com' && (
+                <div className={`pt-4 border-t w-full ${isDarkMode ? 'border-white/5' : 'border-slate-800'}`}>
+                  {(!isRail || isExpanded) && (
+                    <p className={`text-[10px] font-black uppercase tracking-widest px-4 mb-2 ${isDarkMode ? 'text-gray-500' : 'text-slate-500'}`}>Vista Usuario</p>
+                  )}
+                  <SidebarItem
+                    icon={<History size={20} />}
+                    label="Mi Progreso"
+                    active={view === 'user-dashboard'}
+                    onClick={() => { setView('user-dashboard'); setEditingRecordId(null); if (isRail) setIsExpanded(false); if (isMobile) setIsMobileMenuOpen(false); }}
+                    collapsed={isRail && !isExpanded}
+                    isDarkMode={isDarkMode}
+                  />
+                </div>
+              )}
+            </>
+          ) : (
+            <>
+              <SidebarItem
+                icon={<LayoutDashboard size={20} />}
+                label="Mi Progreso"
+                active={view === 'user-dashboard'}
+                onClick={() => { setView('user-dashboard'); setEditingRecordId(null); if (isRail) setIsExpanded(false); if (isMobile) setIsMobileMenuOpen(false); }}
+                collapsed={isRail && !isExpanded}
+                isDarkMode={isDarkMode}
+              />
+              <SidebarItem
+                icon={<Briefcase size={20} />}
+                label="Directorio Proyectos"
+                active={view === 'project-directory'}
+                onClick={() => { setSelectedProjectId(null); setView('project-directory'); setEditingRecordId(null); if (isRail) setIsExpanded(false); if (isMobile) setIsMobileMenuOpen(false); }}
+                collapsed={isRail && !isExpanded}
+                isDarkMode={isDarkMode}
+              />
+              <SidebarItem
+                icon={<Tag size={20} />}
+                label="Habilidades"
+                active={view === 'skill-map'}
+                onClick={() => { setView('skill-map'); setEditingRecordId(null); if (isRail) setIsExpanded(false); if (isMobile) setIsMobileMenuOpen(false); }}
+                collapsed={isRail && !isExpanded}
+                isDarkMode={isDarkMode}
+              />
+            </>
+          )}
+
+          <div className={`pt-4 border-t w-full ${isDarkMode ? 'border-white/5' : 'border-slate-800'}`}>
+            {(!isRail || isExpanded) && (
+              <p className={`text-[10px] font-black uppercase tracking-widest px-4 mb-2 ${isDarkMode ? 'text-gray-500' : 'text-slate-500'}`}>Mis Proyectos</p>
+            )}
+            {projects.filter((p: any) => enrolledProjects.includes(p.id)).map((p: any) => (
+              <SidebarItem
+                key={p.id}
+                icon={<Folder size={20} style={{ color: p.color }} />}
+                label={p.name}
+                active={view === 'project-workspace' && selectedProjectId === p.id}
+                onClick={() => { setSelectedProjectId(p.id); setView('project-workspace'); setEditingRecordId(null); if (isRail) setIsExpanded(false); if (isMobile) setIsMobileMenuOpen(false); }}
+                collapsed={isRail && !isExpanded}
+              />
+            ))}
+          </div>
+        </div>
+
+        <div className={`p-4 border-t ${isDarkMode ? 'border-white/5' : 'border-slate-800'} ${isRail && !isExpanded ? 'flex flex-col items-center' : ''}`}>
+          <button 
+            onClick={() => { onOpenProfile(); if (isRail) setIsExpanded(false); if (isMobile) setIsMobileMenuOpen(false); }}
+            className={`w-full flex items-center gap-3 p-2 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 transition-all group ${isRail && !isExpanded ? 'justify-center' : ''}`}
+          >
+            <div className="w-8 h-8 rounded-lg bg-indigo-500 flex items-center justify-center text-white font-black text-xs flex-shrink-0 relative">
+              {user?.displayName?.charAt(0) || 'U'}
+              <div className="absolute -bottom-1 -right-1 w-3 h-3 bg-green-500 border-2 border-slate-900 rounded-full" title={userRole} />
+            </div>
+            {(!isRail || isExpanded) && (
+              <div className="flex-1 text-left min-w-0">
+                <p className="text-xs font-bold truncate">{user?.displayName || 'Usuario'}</p>
+                <p className={`text-[10px] font-bold uppercase tracking-widest ${isDarkMode ? 'text-gray-500' : 'text-slate-500'}`}>{userRole}</p>
+              </div>
+            )}
+          </button>
+          
+          {isRail && !isExpanded && (
+            <button 
+              onClick={() => setIsExpanded(true)}
+              className="mt-4 p-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition-all"
+              title="Expandir menú"
+            >
+              <ChevronRight size={20} />
+            </button>
+          )}
+
+          {(!isRail || isExpanded) && (
+            <button 
+              onClick={() => auth.signOut()}
+              className="w-full mt-4 flex items-center gap-3 px-4 py-3 rounded-xl text-red-400 hover:text-red-300 hover:bg-red-500/10 transition-all"
+            >
+              <ShieldOff size={20} /> <span className="font-medium">Cerrar Sesión</span>
+            </button>
+          )}
         </div>
       </div>
-      <button 
-        onClick={() => auth.signOut()}
-        className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-xl border border-slate-800 text-slate-400 hover:text-white hover:bg-slate-800 transition-all text-sm font-bold"
-      >
-        Cerrar Sesión
-      </button>
-    </div>
-  </div>
+    </>
   );
 };
 
+const SidebarItem = ({ icon, label, active, onClick, collapsed, badge, isDarkMode }: any) => (
+  <button
+    onClick={onClick}
+    title={collapsed ? label : undefined}
+    className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all group relative ${
+      active 
+        ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/30' 
+        : `${isDarkMode ? 'text-gray-400 hover:text-white hover:bg-white/5' : 'text-slate-400 hover:text-white hover:bg-slate-800'}`
+    } ${collapsed ? 'justify-center px-0' : ''}`}
+  >
+    <div className="flex-shrink-0 relative">
+      {icon}
+      {collapsed && badge && (
+        <div className={`absolute -top-1 -right-1 w-4 h-4 bg-red-500 text-white text-[8px] font-black rounded-full flex items-center justify-center border-2 ${isDarkMode ? 'border-[#121212]' : 'border-slate-900'}`}>
+          {badge > 9 ? '9+' : badge}
+        </div>
+      )}
+    </div>
+    {!collapsed && <span className="font-medium truncate flex-1 text-left">{label}</span>}
+    {!collapsed && badge && (
+      <span className="bg-red-500 text-white text-[9px] font-black px-1.5 py-0.5 rounded-full">
+        {badge > 9 ? '9+' : badge}
+      </span>
+    )}
+  </button>
+);
+
 const UserDashboard = ({ student, setStudents, userRole, categories, setCategories, projects, students, checkTimeOverlap, selectedRecords, setSelectedRecords, handleDeleteSelected, setView, setSelectedProjectId }: any) => {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  console.log('DEBUG: UserDashboard', { userRole });
-  if (!student) return <div className="p-20 text-center font-black text-slate-400 uppercase tracking-widest">Cargando perfil...</div>;
   
-  const studentProjectIds = (student.projectIds && student.projectIds.length > 0) ? student.projectIds : ['p-general'];
+  const studentProjectIds = student 
+    ? Array.from(new Set(((student.projectIds && student.projectIds.length > 0) ? student.projectIds : ['p-general']) as string[]))
+    : ['p-general'];
   
   const projectStats = useMemo(() => {
+    if (!student) return [];
     const stats: Record<string, number> = {};
-    (student.records || []).forEach((r: any) => {
+    studentProjectIds.forEach((pid: string) => {
+      stats[pid] = 0;
+    });
+    (student?.records || []).forEach((r: any) => {
       if (r.validationStatus === 'aprobado' || !r.validationStatus) {
         stats[r.projectId] = (stats[r.projectId] || 0) + r.hours;
       }
@@ -402,7 +508,7 @@ const UserDashboard = ({ student, setStudents, userRole, categories, setCategori
       const p = projects.find((proj: any) => proj.id === pid);
       return { id: pid, name: p?.name || pid, hours, color: p?.color || '#cbd5e1' };
     });
-  }, [student.records, projects]);
+  }, [student?.records, projects, studentProjectIds]);
 
   const [form, setForm] = useState({
     date: getCDMXDateString(),
@@ -421,8 +527,11 @@ const UserDashboard = ({ student, setStudents, userRole, categories, setCategori
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [sortOrder, setSortOrder] = useState<'desc' | 'asc'>('desc');
 
-  const totalHours = (student.records || []).reduce((acc: number, r: any) => {
-    if (r.validationStatus === 'aprobado') return acc + r.hours;
+  const totalHours = (student?.records || []).reduce((acc: number, r: any) => {
+    if (r.validationStatus === 'aprobado') {
+      const val = parseFloat(r.hours);
+      return acc + (isNaN(val) ? 0 : val);
+    }
     return acc;
   }, 0);
   const progress = Math.min((totalHours / TOTAL_REQUIRED_HOURS) * 100, 100);
@@ -490,7 +599,7 @@ const UserDashboard = ({ student, setStudents, userRole, categories, setCategori
     }
 
     // Validar traslapes
-    if (checkTimeOverlap(student.id, form.date, form.startTime, form.endTime, editingRecordId)) {
+    if (checkTimeOverlap(student?.id, form.date, form.startTime, form.endTime, editingRecordId)) {
       setErrorMessage("Ya tienes una actividad registrada en este horario.");
       showErrorToast("Ya tienes una actividad registrada en este horario.");
       return;
@@ -530,7 +639,7 @@ const UserDashboard = ({ student, setStudents, userRole, categories, setCategori
     };
 
     if (editingRecordId) {
-      const updatedStudents = students.map((s: any) => s.id === student.id ? { 
+      const updatedStudents = students.map((s: any) => s.id === student?.id ? { 
         ...s, 
         records: (s.records || []).map((r: any) => r.id === editingRecordId ? newRecord : r) 
       } : s);
@@ -539,42 +648,42 @@ const UserDashboard = ({ student, setStudents, userRole, categories, setCategori
       // Persist to Firestore
       const updateFirestore = async () => {
         try {
-          const studentToUpdate = updatedStudents.find((s: any) => s.id === student.id);
+          const studentToUpdate = updatedStudents.find((s: any) => s.id === student?.id);
           if (studentToUpdate) {
             const dataToSave = {
               ...studentToUpdate,
-              uid: student.id,
+              uid: student?.id,
               role: studentToUpdate.role || 'user',
               createdAt: studentToUpdate.createdAt || new Date().toISOString()
             };
-            await setDoc(doc(db, 'users', student.id), dataToSave, { merge: true });
+            await setDoc(doc(db, 'users', student?.id), dataToSave, { merge: true });
           }
         } catch (error) {
-          handleFirestoreError(error, OperationType.WRITE, `users/${student.id}`);
+          handleFirestoreError(error, OperationType.WRITE, `users/${student?.id}`);
         }
       };
       updateFirestore();
       setEditingRecordId(null);
       showSuccessToast("Registro actualizado");
     } else {
-      const updatedStudents = students.map((s: any) => s.id === student.id ? { ...s, records: [...(s.records || []), newRecord] } : s);
+      const updatedStudents = students.map((s: any) => s.id === student?.id ? { ...s, records: [...(s.records || []), newRecord] } : s);
       setStudents(updatedStudents);
 
       // Persist to Firestore
       const updateFirestore = async () => {
         try {
-          const studentToUpdate = updatedStudents.find((s: any) => s.id === student.id);
+          const studentToUpdate = updatedStudents.find((s: any) => s.id === student?.id);
           if (studentToUpdate) {
             const dataToSave = {
               ...studentToUpdate,
-              uid: student.id,
+              uid: student?.id,
               role: studentToUpdate.role || 'user',
               createdAt: studentToUpdate.createdAt || new Date().toISOString()
             };
-            await setDoc(doc(db, 'users', student.id), dataToSave, { merge: true });
+            await setDoc(doc(db, 'users', student?.id), dataToSave, { merge: true });
           }
         } catch (error) {
-          handleFirestoreError(error, OperationType.WRITE, `users/${student.id}`);
+          handleFirestoreError(error, OperationType.WRITE, `users/${student?.id}`);
         }
       };
       updateFirestore();
@@ -610,30 +719,30 @@ const UserDashboard = ({ student, setStudents, userRole, categories, setCategori
 
   const handleDeleteTask = (recordId: string) => {
     showConfirmToast("¿Estás seguro de que deseas eliminar esta actividad?", async () => {
-      const updatedRecords = (student.records || []).filter((r: any) => r.id !== recordId);
-      const updatedStudents = students.map((s: any) => s.id === student.id ? { ...s, records: updatedRecords } : s);
+      const updatedRecords = (student?.records || []).filter((r: any) => r.id !== recordId);
+      const updatedStudents = students.map((s: any) => s.id === student?.id ? { ...s, records: updatedRecords } : s);
       
       setStudents(updatedStudents);
       try {
-        const studentToUpdate = updatedStudents.find((s: any) => s.id === student.id);
+        const studentToUpdate = updatedStudents.find((s: any) => s.id === student?.id);
         if (studentToUpdate) {
           const dataToSave = {
             ...studentToUpdate,
-            uid: student.id,
+            uid: student?.id,
             role: studentToUpdate.role || 'user',
             createdAt: studentToUpdate.createdAt || new Date().toISOString()
           };
-          await setDoc(doc(db, 'users', student.id), dataToSave, { merge: true });
+          await setDoc(doc(db, 'users', student?.id), dataToSave, { merge: true });
           showSuccessToast("Actividad eliminada");
         }
       } catch (error) {
-        handleFirestoreError(error, OperationType.WRITE, `users/${student.id}`);
+        handleFirestoreError(error, OperationType.WRITE, `users/${student?.id}`);
       }
     });
   };
 
   const handleDeleteSelectedLocal = () => {
-    handleDeleteSelected(student.id);
+    handleDeleteSelected(student?.id);
   };
 
   const downloadCSV = () => {
@@ -642,7 +751,7 @@ const UserDashboard = ({ student, setStudents, userRole, categories, setCategori
       return;
     }
 
-    const recordsToExport = (student.records || []).filter((r: any) => selectedRecords.includes(r.id));
+    const recordsToExport = (student?.records || []).filter((r: any) => selectedRecords.includes(r.id));
     const headers = ["Fecha", "Hora de entrada", "Hora de salida", "Descripción de actividades"];
     const rows = recordsToExport.map((r: any) => [
       r.date,
@@ -656,7 +765,7 @@ const UserDashboard = ({ student, setStudents, userRole, categories, setCategori
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.setAttribute("href", url);
-    link.setAttribute("download", `actividades_${student.firstName}_${Date.now()}.csv`);
+    link.setAttribute("download", `actividades_${student?.firstName}_${Date.now()}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -666,7 +775,7 @@ const UserDashboard = ({ student, setStudents, userRole, categories, setCategori
   const handleAddTag = (projectId: string) => {
     if (!tagInput.trim()) return;
     setStudents((prev: any) => prev.map((s: any) => {
-      if (s.id === student.id) {
+      if (s.id === student?.id) {
         const currentTags = s.projectTasks?.[projectId] || [];
         if (currentTags.includes(tagInput.trim())) return s;
         return {
@@ -685,12 +794,71 @@ const UserDashboard = ({ student, setStudents, userRole, categories, setCategori
   };
 
   const collaborators = useMemo(() => {
+    if (!student) return [];
     return students.filter((s: any) => 
-      s.id !== student.id && 
+      s.id !== student?.id && 
       s.email !== 'mortovki@gmail.com' &&
       (s.projectIds || []).some((pid: string) => studentProjectIds.includes(pid))
     );
-  }, [students, student.id, studentProjectIds]);
+  }, [students, student?.id, studentProjectIds]);
+
+  const [assignedTasks, setAssignedTasks] = useState<any[]>([]);
+  const [loadingTasks, setLoadingTasks] = useState(true);
+
+  useEffect(() => {
+    if (!student?.id || !studentProjectIds.length) {
+      setLoadingTasks(false);
+      return;
+    }
+
+    const unsubscribes: (() => void)[] = [];
+    let projectsLoaded = 0;
+
+    studentProjectIds.forEach((pid: string) => {
+      const q = query(
+        collection(db, 'projects', pid, 'tasks'),
+        where('assignedTo', '==', student?.id),
+        where('deletedAt', '==', null)
+      );
+
+      const unsub = onSnapshot(q, (snapshot) => {
+        const projectTasks = snapshot.docs.map(doc => ({
+          id: doc.id,
+          projectId: pid,
+          ...doc.data()
+        }));
+        
+        setAssignedTasks(prev => {
+          const otherTasks = prev.filter(t => t.projectId !== pid);
+          return [...otherTasks, ...projectTasks];
+        });
+        
+        projectsLoaded++;
+        if (projectsLoaded >= studentProjectIds.length) {
+          setLoadingTasks(false);
+        }
+      }, (err) => {
+        console.error(`Error fetching tasks for project ${pid}:`, err);
+        projectsLoaded++;
+        if (projectsLoaded >= studentProjectIds.length) {
+          setLoadingTasks(false);
+        }
+      });
+      unsubscribes.push(unsub);
+    });
+
+    return () => unsubscribes.forEach(unsub => unsub());
+  }, [student?.id, studentProjectIds]);
+
+  const pendingRecords = useMemo(() => {
+    return (student?.records || []).filter((r: any) => r.validationStatus === 'pendiente');
+  }, [student?.records]);
+
+  const unfinishedTasks = useMemo(() => {
+    return assignedTasks.filter((t: any) => t.status !== 'done');
+  }, [assignedTasks]);
+
+  if (!student) return <div className="p-20 text-center font-black text-slate-400 uppercase tracking-widest">Cargando perfil...</div>;
 
   return (
     <div className="space-y-8">
@@ -707,7 +875,7 @@ const UserDashboard = ({ student, setStudents, userRole, categories, setCategori
                 </button>
               </div>
 
-      <div className="grid grid-cols-1 gap-8 items-start max-w-4xl mx-auto">
+      <div className="grid grid-cols-1 lg:grid-cols-[1.5fr_1fr] gap-8 items-start max-w-7xl mx-auto">
         <div className="grid grid-cols-1 gap-8 items-start">
           <div className="bg-white p-6 sm:p-10 rounded-[2rem] sm:rounded-[3rem] border border-slate-200 shadow-sm space-y-6 sm:space-y-8">
             <h3 className="text-xl sm:text-2xl font-black text-slate-900 flex items-center gap-3">
@@ -758,7 +926,7 @@ const UserDashboard = ({ student, setStudents, userRole, categories, setCategori
                   <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-2">PROYECTO</label>
                   <div className="relative">
                     <select className="w-full pl-4 pr-12 py-4 bg-slate-50 border-none rounded-2xl text-sm font-bold outline-none focus:ring-2 focus:ring-indigo-500/10 transition-all appearance-none cursor-pointer" value={form.projectId} onChange={e => setForm({...form, projectId: e.target.value})}>
-                      {studentProjectIds.map((pid: string) => {
+                      {Array.from(new Set(studentProjectIds)).map((pid: string) => {
                         const p = projects.find((proj: any) => proj.id === pid);
                         return <option key={pid} value={pid}>{p?.name || pid}</option>;
                       })}
@@ -834,6 +1002,99 @@ const UserDashboard = ({ student, setStudents, userRole, categories, setCategori
             </div>
           </div>
 
+          {/* MIS PENDIENTES */}
+          {(unfinishedTasks.length > 0 || pendingRecords.length > 0) && (
+            <div className="bg-white p-6 sm:p-10 rounded-[2rem] sm:rounded-[3rem] border border-slate-200 shadow-sm space-y-8">
+              <div className="flex justify-between items-center">
+                <h3 className="text-xl sm:text-2xl font-black text-slate-900 flex items-center gap-3">
+                  <Clock className="text-amber-500 w-6 h-6 sm:w-7 sm:h-7" /> Mis Pendientes
+                </h3>
+                <div className="flex gap-2">
+                  <span className="bg-amber-100 text-amber-600 px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-widest">
+                    {unfinishedTasks.length + pendingRecords.length} Total
+                  </span>
+                </div>
+              </div>
+
+              <div className="space-y-6">
+                {/* Tareas del Proyecto */}
+                {unfinishedTasks.length > 0 && (
+                  <div className="space-y-4">
+                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-2">Tareas en Curso</p>
+                    <div className="grid grid-cols-1 gap-3">
+                      {unfinishedTasks.map((t: any) => {
+                        const p = projects.find((proj: any) => proj.id === t.projectId);
+                        return (
+                          <div 
+                            key={t.id} 
+                            onClick={() => {
+                              if (setView && setSelectedProjectId) {
+                                setSelectedProjectId(t.projectId);
+                                setView('project-workspace');
+                              }
+                            }}
+                            className="bg-slate-50 p-4 rounded-2xl border border-slate-100 flex items-center justify-between hover:bg-white hover:shadow-md transition-all cursor-pointer group"
+                          >
+                            <div className="flex items-center gap-4 min-w-0">
+                              <div className="w-2 h-10 rounded-full shrink-0" style={{ backgroundColor: p?.color || '#cbd5e1' }}></div>
+                              <div className="min-w-0">
+                                <p className="font-bold text-slate-800 text-sm truncate">{t.title}</p>
+                                <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest truncate">{p?.name || 'Proyecto'}</p>
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-3 shrink-0">
+                              <span className={`text-[8px] font-black px-2 py-1 rounded-full uppercase tracking-widest ${
+                                t.status === 'stuck' ? 'bg-red-100 text-red-600' : 
+                                t.status === 'working_on_it' ? 'bg-blue-100 text-blue-600' : 
+                                'bg-slate-100 text-slate-600'
+                              }`}>
+                                {t.status === 'stuck' ? 'Atascado' : t.status === 'working_on_it' ? 'En Curso' : 'Pendiente'}
+                              </span>
+                              <ChevronRight size={16} className="text-slate-300 group-hover:text-indigo-600 transition-colors" />
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* Registros por Aprobar */}
+                {pendingRecords.length > 0 && (
+                  <div className="space-y-4">
+                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-2">Registros por Aprobar</p>
+                    <div className="grid grid-cols-1 gap-3">
+                      {pendingRecords.map((r: any) => {
+                        const p = projects.find((proj: any) => proj.id === r.projectId);
+                        return (
+                          <div key={r.id} className="bg-amber-50/30 p-4 rounded-2xl border border-amber-100/50 flex items-center justify-between">
+                            <div className="flex items-center gap-4 min-w-0">
+                              <div className="w-10 h-10 rounded-xl bg-amber-100 flex items-center justify-center text-amber-600 shrink-0">
+                                <Clock size={20} />
+                              </div>
+                              <div className="min-w-0">
+                                <p className="font-bold text-slate-800 text-sm truncate">{r.description || 'Sin descripción'}</p>
+                                <div className="flex items-center gap-2">
+                                  <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest">{r.date}</span>
+                                  <span className="w-1 h-1 bg-slate-300 rounded-full"></span>
+                                  <span className="text-[9px] font-black text-indigo-600 uppercase tracking-widest">{p?.name || 'Proyecto'}</span>
+                                </div>
+                              </div>
+                            </div>
+                            <div className="text-right shrink-0">
+                              <p className="text-sm font-black text-amber-600">{r.hours}h</p>
+                              <p className="text-[8px] font-black text-amber-400 uppercase tracking-widest">Pendiente</p>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
           {/* ETIQUETAS DE ACTIVIDAD */}
           <div className="bg-white p-6 sm:p-10 rounded-[2rem] sm:rounded-[3rem] border border-slate-200 shadow-sm space-y-8">
             <h3 className="text-xl sm:text-2xl font-black text-slate-900 flex items-center gap-3">
@@ -847,12 +1108,12 @@ const UserDashboard = ({ student, setStudents, userRole, categories, setCategori
                       <div className="w-3 h-3 rounded-full" style={{ backgroundColor: stat.color }}></div>
                       <span className="font-black text-xs uppercase text-slate-700">{stat.name}</span>
                     </div>
-                    <span className="text-lg font-black text-indigo-600">{Number(stat.hours.toFixed(2))}h</span>
+                    <span className="text-lg font-black text-indigo-600">{Number(stat.hours.toFixed(2))} / {TOTAL_REQUIRED_HOURS}h</span>
                   </div>
                   <div className="w-full bg-slate-200 h-2 rounded-full overflow-hidden">
-                    <div className="h-full rounded-full transition-all duration-1000" style={{ width: `${Math.min((stat.hours / TOTAL_REQUIRED_HOURS) * 100 * 5, 100)}%`, backgroundColor: stat.color }}></div>
+                    <div className="h-full rounded-full transition-all duration-1000" style={{ width: `${Math.min((stat.hours / TOTAL_REQUIRED_HOURS) * 100, 100)}%`, backgroundColor: stat.color }}></div>
                   </div>
-                  <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Aportación al progreso total</p>
+                  <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Progreso del proyecto</p>
                 </div>
               ))}
               {projectStats.length === 0 && <p className="text-center py-10 text-slate-300 font-black uppercase tracking-widest text-[10px] col-span-full">No hay horas registradas aún</p>}
@@ -865,7 +1126,7 @@ const UserDashboard = ({ student, setStudents, userRole, categories, setCategori
               <Tag className="text-indigo-600 w-6 h-6 sm:w-7 sm:h-7" /> Mis Etiquetas por Proyecto
             </h3>
             <div className="grid grid-cols-1 gap-6">
-              {studentProjectIds.map((pid: string) => {
+              {Array.from(new Set(studentProjectIds)).map((pid: string) => {
                 const p = projects.find((proj: any) => proj.id === pid);
                 const tags = student.projectTasks?.[pid] || [];
                 return (
@@ -908,7 +1169,7 @@ const UserDashboard = ({ student, setStudents, userRole, categories, setCategori
                           #{t}
                           <button onClick={() => {
                             setStudents((prev: any) => prev.map((s: any) => {
-                              if (s.id === student.id) {
+                              if (s.id === student?.id) {
                                 return {
                                   ...s,
                                   projectTasks: {
@@ -955,7 +1216,7 @@ const UserDashboard = ({ student, setStudents, userRole, categories, setCategori
                       
                       {commonProjects.length > 0 && collab.role !== 'coordinator' && collab.role !== 'admin' && (
                         <div className="flex flex-wrap gap-1">
-                          {commonProjects.map((pid: string) => {
+                          {Array.from(new Set(commonProjects)).map((pid: string) => {
                             const p = projects.find((proj: any) => proj.id === pid);
                             return (
                               <span 
@@ -1022,7 +1283,7 @@ const UserDashboard = ({ student, setStudents, userRole, categories, setCategori
         <div className="space-y-8">
           <div className="bg-white p-10 rounded-[3rem] border border-slate-200 shadow-sm">
             <div className="flex justify-between items-center mb-6">
-                <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Progreso General</span>
+                <span className="text-[10px] font-black text-indigo-600 uppercase tracking-[0.2em] bg-indigo-50 px-3 py-1 rounded-full shadow-sm border border-indigo-100">Progreso General</span>
                 <span className="text-2xl font-black text-indigo-600 tracking-tighter">{Number(totalHours.toFixed(2))} / {TOTAL_REQUIRED_HOURS}</span>
             </div>
             <div className="w-full bg-slate-100 h-6 rounded-full overflow-hidden mb-4 shadow-inner">
@@ -1032,43 +1293,43 @@ const UserDashboard = ({ student, setStudents, userRole, categories, setCategori
           </div>
 
           <div className="bg-white p-10 rounded-[3rem] border border-slate-200 shadow-sm space-y-6">
-            <div className="flex justify-between items-center">
+            <div className="flex flex-col gap-4">
               <h3 className="text-xl font-black text-slate-900 flex items-center gap-3">
                 <History className="text-slate-400" size={24} /> Recientes
               </h3>
-              <div className="flex gap-2">
+              <div className="flex gap-2 overflow-x-auto hide-scrollbar snap-x snap-mandatory w-full pb-2">
                 {selectedRecords.length > 0 && (
                   <>
-                    <button onClick={handleDeleteSelectedLocal} className="p-2 bg-rose-100 text-rose-600 rounded-xl hover:bg-rose-600 hover:text-white transition-all shadow-sm" title="Borrar Seleccionados">
+                    <button onClick={handleDeleteSelectedLocal} className="p-2 bg-rose-100 text-rose-600 rounded-xl hover:bg-rose-600 hover:text-white transition-all shadow-sm shrink-0 snap-center" title="Borrar Seleccionados">
                       <Trash2 size={18} />
                     </button>
-                    <button onClick={downloadCSV} className="p-2 bg-indigo-100 text-indigo-600 rounded-xl hover:bg-indigo-600 hover:text-white transition-all shadow-sm" title="Descargar Seleccionados">
+                    <button onClick={downloadCSV} className="p-2 bg-indigo-100 text-indigo-600 rounded-xl hover:bg-indigo-600 hover:text-white transition-all shadow-sm shrink-0 snap-center" title="Descargar Seleccionados">
                       <Download size={18} />
                     </button>
                   </>
                 )}
                 <button 
                   onClick={() => setSortOrder(prev => prev === 'desc' ? 'asc' : 'desc')}
-                  className="p-2 bg-slate-100 text-slate-600 rounded-xl hover:bg-slate-200 transition-all shadow-sm flex items-center justify-center"
+                  className="p-2 bg-slate-100 text-slate-600 rounded-xl hover:bg-slate-200 transition-all shadow-sm flex items-center justify-center shrink-0 snap-center"
                   title={sortOrder === 'desc' ? 'Ordenar Ascendente' : 'Ordenar Descendente'}
                 >
                   <ArrowDownUp size={18} className={sortOrder === 'asc' ? 'rotate-180 transition-transform' : 'transition-transform'} />
                 </button>
                 <button 
                   onClick={() => {
-                    const records = student.records || [];
+                    const records = student?.records || [];
                     if (selectedRecords.length === records.length) setSelectedRecords([]);
                     else setSelectedRecords(records.map((r: any) => r.id));
-                  }} 
-                  className={`p-2 rounded-xl transition-all shadow-sm flex items-center justify-center ${selectedRecords.length > 0 && selectedRecords.length === (student.records || []).length ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
-                  title={selectedRecords.length > 0 && selectedRecords.length === (student.records || []).length ? 'Deseleccionar Todo' : 'Seleccionar Todo'}
+                  }}
+                  className={`p-2 rounded-xl transition-all shadow-sm flex items-center justify-center shrink-0 snap-center ${selectedRecords.length > 0 && selectedRecords.length === (student?.records || []).length ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+                  title={selectedRecords.length > 0 && selectedRecords.length === (student?.records || []).length ? 'Deseleccionar Todo' : 'Seleccionar Todo'}
                 >
-                  {selectedRecords.length > 0 && selectedRecords.length === (student.records || []).length ? <X size={18} /> : <CheckSquare size={18} />}
+                  {selectedRecords.length > 0 && selectedRecords.length === (student?.records || []).length ? <X size={18} /> : <CheckSquare size={18} />}
                 </button>
               </div>
             </div>
             <div className="space-y-4 max-h-[600px] overflow-y-auto pr-2 custom-scrollbar">
-                {(student.records || []).slice().sort((a: any, b: any) => {
+                {(student?.records || []).slice().sort((a: any, b: any) => {
                   const dateA = new Date(`${a.date}T${a.startTime || '00:00'}`).getTime();
                   const dateB = new Date(`${b.date}T${b.startTime || '00:00'}`).getTime();
                   return sortOrder === 'desc' ? dateB - dateA : dateA - dateB;
@@ -1129,7 +1390,7 @@ const UserDashboard = ({ student, setStudents, userRole, categories, setCategori
                     </div>
                   );
                 })}
-                {(student.records || []).length === 0 && (
+                {(student?.records || []).length === 0 && (
                   <div className="text-center py-10">
                     <p className="text-slate-300 font-black uppercase tracking-widest text-[10px]">No hay registros aún</p>
                   </div>
@@ -1145,13 +1406,13 @@ const UserDashboard = ({ student, setStudents, userRole, categories, setCategori
 const showSuccessToast = (message: string) => {
   toast.custom((t) => createPortal(
     <div className={`fixed inset-0 flex items-center justify-center z-[99999] pointer-events-none p-4 transition-all duration-500 ease-out ${t.visible ? 'opacity-100 scale-100' : 'opacity-0 scale-90'}`}>
-      <div className="max-w-md w-full bg-white/95 backdrop-blur-xl border-4 border-emerald-500 shadow-[0_32px_64px_-12px_rgba(16,185,129,0.4)] rounded-[3rem] pointer-events-auto flex flex-col items-center p-10 gap-6 text-center">
+      <div className="max-w-md w-full bg-white/95 dark:bg-[#1a1a1a]/95 backdrop-blur-xl border-4 border-emerald-500 shadow-[0_32px_64px_-12px_rgba(16,185,129,0.4)] rounded-[3rem] pointer-events-auto flex flex-col items-center p-10 gap-6 text-center">
         <div className="bg-emerald-500 p-6 rounded-full shadow-lg shadow-emerald-500/30">
           <CheckCircle2 size={48} className="text-white" />
         </div>
         <div className="space-y-2">
-          <p className="font-black text-2xl text-slate-900 uppercase tracking-tighter leading-none">¡Éxito!</p>
-          <p className="text-slate-500 font-bold text-sm uppercase tracking-widest">{message}</p>
+          <p className="font-black text-2xl text-slate-900 dark:text-white uppercase tracking-tighter leading-none">¡Éxito!</p>
+          <p className="text-slate-500 dark:text-gray-400 font-bold text-sm uppercase tracking-widest">{message}</p>
         </div>
         <button 
           onClick={() => toast.dismiss(t.id)} 
@@ -1168,13 +1429,13 @@ const showSuccessToast = (message: string) => {
 const showErrorToast = (message: string, onRetry?: () => void) => {
   toast.custom((t) => createPortal(
     <div className={`fixed inset-0 flex items-center justify-center z-[99999] pointer-events-none p-4 transition-all duration-500 ease-out ${t.visible ? 'opacity-100 scale-100' : 'opacity-0 scale-90'}`}>
-      <div className="max-w-md w-full bg-white/95 backdrop-blur-xl border-4 border-red-500 shadow-[0_32px_64px_-12px_rgba(239,68,68,0.4)] rounded-[3rem] pointer-events-auto flex flex-col items-center p-10 gap-6 text-center">
+      <div className="max-w-md w-full bg-white/95 dark:bg-[#1a1a1a]/95 backdrop-blur-xl border-4 border-red-500 shadow-[0_32px_64px_-12px_rgba(239,68,68,0.4)] rounded-[3rem] pointer-events-auto flex flex-col items-center p-10 gap-6 text-center">
         <div className="bg-red-500 p-6 rounded-full shadow-lg shadow-red-500/30">
           <AlertCircle size={48} className="text-white" />
         </div>
         <div className="space-y-2">
-          <p className="font-black text-2xl text-slate-900 uppercase tracking-tighter leading-none">Error</p>
-          <p className="text-slate-500 font-bold text-sm uppercase tracking-widest leading-relaxed">{message}</p>
+          <p className="font-black text-2xl text-slate-900 dark:text-white uppercase tracking-tighter leading-none">Error</p>
+          <p className="text-slate-500 dark:text-gray-400 font-bold text-sm uppercase tracking-widest leading-relaxed">{message}</p>
         </div>
         <div className="flex gap-4 w-full">
           {onRetry && (
@@ -1201,18 +1462,18 @@ const showErrorToast = (message: string, onRetry?: () => void) => {
 const showConfirmToast = (message: string, onConfirm: () => void) => {
   toast.custom((t) => createPortal(
     <div className={`fixed inset-0 flex items-center justify-center z-[99999] pointer-events-none p-4 transition-all duration-500 ease-out ${t.visible ? 'opacity-100 scale-100' : 'opacity-0 scale-90'}`}>
-      <div className="max-w-md w-full bg-white/95 backdrop-blur-xl border-4 border-red-500 shadow-[0_32px_64px_-12px_rgba(239,68,68,0.4)] rounded-[3rem] pointer-events-auto flex flex-col items-center p-10 gap-6 text-center">
+      <div className="max-w-md w-full bg-white/95 dark:bg-[#1a1a1a]/95 backdrop-blur-xl border-4 border-red-500 shadow-[0_32px_64px_-12px_rgba(239,68,68,0.4)] rounded-[3rem] pointer-events-auto flex flex-col items-center p-10 gap-6 text-center">
         <div className="bg-red-500 p-6 rounded-full shadow-lg shadow-red-500/30">
           <AlertCircle size={48} className="text-white" />
         </div>
         <div className="space-y-2">
-          <p className="font-black text-2xl text-slate-900 uppercase tracking-tighter leading-none">Confirmar</p>
-          <p className="text-slate-500 font-bold text-sm uppercase tracking-widest leading-relaxed">{message}</p>
+          <p className="font-black text-2xl text-slate-900 dark:text-white uppercase tracking-tighter leading-none">Confirmar</p>
+          <p className="text-slate-500 dark:text-gray-400 font-bold text-sm uppercase tracking-widest leading-relaxed">{message}</p>
         </div>
         <div className="flex gap-4 w-full">
           <button 
             onClick={() => toast.dismiss(t.id)} 
-            className="flex-1 px-6 py-4 bg-slate-100 text-slate-600 rounded-2xl font-black text-xs uppercase tracking-widest hover:bg-slate-200 transition-all active:scale-95 shadow-sm"
+            className="flex-1 px-6 py-4 bg-slate-100 dark:bg-white/10 text-slate-600 dark:text-gray-300 rounded-2xl font-black text-xs uppercase tracking-widest hover:bg-slate-200 dark:hover:bg-white/20 transition-all active:scale-95 shadow-sm"
           >
             Cancelar
           </button>
@@ -1231,10 +1492,10 @@ const showConfirmToast = (message: string, onConfirm: () => void) => {
 
 const INITIAL_STUDENTS = [
   {
-    id: '1',
+    id: 'p1',
     firstName: 'Juan',
     lastNamePaterno: 'Pérez',
-    lastNameMaterno: '',
+    lastNameMaterno: 'López',
     studentId: '315123456',
     nickname: 'Juanito',
     phone: '5512345678',
@@ -1242,15 +1503,213 @@ const INITIAL_STUDENTS = [
     email: 'juan@correo.com',
     brigadePeriod: '111',
     brigade: 'Brigada 111',
-    skills: ['AutoCAD', 'SketchUp', 'Revit'],
+    skills: [{ id: "arq_ts1", level: 3 }, { id: "arq_ts2", level: 2 }, { id: "arq_ss1", level: 3 }, { id: "arq_ss4", level: 3 }],
     career: 'Arquitectura',
     status: 'En Curso',
     workStatus: 'Asignado',
     projectIds: ['p-1'],
-    projectTasks: {
-      'p-1': ['Realizando planos', 'Investigación']
-    },
-    records: []
+    projectTasks: { 'p-1': ['Urbanismo Participativo'] },
+    records: [],
+    color: '#f97316',
+    position: 'Estudiante Arquitectura - Urbanismo Participativo'
+  },
+  {
+    id: 'p2',
+    firstName: 'María',
+    lastNamePaterno: 'González',
+    lastNameMaterno: 'Ruiz',
+    studentId: '315123457',
+    nickname: 'Mari',
+    phone: '5512345679',
+    emergencyPhone: '5598765433',
+    email: 'maria@correo.com',
+    brigadePeriod: '111',
+    brigade: 'Brigada 111',
+    skills: [{ id: "arq_ts3", level: 3 }, { id: "arq_data1", level: 3 }, { id: "arq_ss2", level: 3 }, { id: "arq_ss10", level: 2 }],
+    career: 'Arquitectura',
+    status: 'En Curso',
+    workStatus: 'Asignado',
+    projectIds: ['p-2'],
+    projectTasks: { 'p-2': ['Movilidad'] },
+    records: [],
+    color: '#3b82f6',
+    position: 'Arquitecta Servicio Social - Movilidad'
+  },
+  {
+    id: 'p3',
+    firstName: 'Carlos',
+    lastNamePaterno: 'Ramírez',
+    lastNameMaterno: '',
+    studentId: '315123458',
+    nickname: 'Carlitos',
+    phone: '5512345680',
+    emergencyPhone: '5598765434',
+    email: 'carlos@correo.com',
+    brigadePeriod: '111',
+    brigade: 'Brigada 111',
+    skills: [{ id: "arq_ts2", level: 2 }, { id: "arq_ts4", level: 2 }, { id: "arq_ss3", level: 2 }, { id: "arq_design1", level: 2 }],
+    career: 'Arquitectura',
+    status: 'En Curso',
+    workStatus: 'Asignado',
+    projectIds: ['p-1'],
+    projectTasks: { 'p-1': ['Diseño Bioclimático'] },
+    records: [],
+    color: '#10b981',
+    position: 'Estudiante Arquitectura - Diseño Bioclimático'
+  },
+  {
+    id: 'p4',
+    firstName: 'Ana',
+    lastNamePaterno: 'Beltrán',
+    lastNameMaterno: '',
+    studentId: '315123459',
+    nickname: 'Anita',
+    phone: '5512345681',
+    emergencyPhone: '5598765435',
+    email: 'ana@correo.com',
+    brigadePeriod: '111',
+    brigade: 'Brigada 111',
+    skills: [{ id: "arq_ts1", level: 3 }, { id: "arq_ts2", level: 2 }, { id: "arq_ss4", level: 3 }, { id: "arq_ss5", level: 2 }],
+    career: 'Arquitectura',
+    status: 'En Curso',
+    workStatus: 'Asignado',
+    projectIds: ['p-2'],
+    projectTasks: { 'p-2': ['Gestión de Obra'] },
+    records: [],
+    color: '#8b5cf6',
+    position: 'Arquitecta - Gestión de Obra'
+  },
+  {
+    id: 'p5',
+    firstName: 'Luis',
+    lastNamePaterno: 'Torres',
+    lastNameMaterno: '',
+    studentId: '315123460',
+    nickname: 'Lucho',
+    phone: '5512345682',
+    emergencyPhone: '5598765436',
+    email: 'luis@correo.com',
+    brigadePeriod: '111',
+    brigade: 'Brigada 111',
+    skills: [{ id: "arq_ts3", level: 3 }, { id: "arq_ts4", level: 2 }, { id: "arq_ss1", level: 3 }, { id: "arq_ss2", level: 3 }],
+    career: 'Arquitectura del Paisaje',
+    status: 'En Curso',
+    workStatus: 'Asignado',
+    projectIds: ['p-1'],
+    projectTasks: { 'p-1': ['Paisajismo'] },
+    records: [],
+    color: '#f59e0b',
+    position: 'Estudiante Arquitectura - Paisajismo'
+  },
+  {
+    id: 'p6',
+    firstName: 'Elena',
+    lastNamePaterno: 'Martínez',
+    lastNameMaterno: '',
+    studentId: '315123461',
+    nickname: 'Ele',
+    phone: '5512345683',
+    emergencyPhone: '5598765437',
+    email: 'elena@correo.com',
+    brigadePeriod: '111',
+    brigade: 'Brigada 111',
+    skills: [{ id: "arq_ts1", level: 3 }, { id: "arq_ts3", level: 3 }, { id: "arq_ss6", level: 2 }, { id: "arq_ss7", level: 2 }],
+    career: 'Arquitectura',
+    status: 'En Curso',
+    workStatus: 'Asignado',
+    projectIds: ['p-2'],
+    projectTasks: { 'p-2': ['Restauración'] },
+    records: [],
+    color: '#ec4899',
+    position: 'Arquitecta - Restauración'
+  },
+  {
+    id: 'p7',
+    firstName: 'Roberto',
+    lastNamePaterno: 'Díaz',
+    lastNameMaterno: '',
+    studentId: '315123462',
+    nickname: 'Beto',
+    phone: '5512345684',
+    emergencyPhone: '5598765438',
+    email: 'roberto@correo.com',
+    brigadePeriod: '111',
+    brigade: 'Brigada 111',
+    skills: [{ id: "arq_ts2", level: 3 }, { id: "arq_ts1", level: 2 }, { id: "arq_ss8", level: 2 }, { id: "arq_ss9", level: 2 }],
+    career: 'Arquitectura',
+    status: 'En Curso',
+    workStatus: 'Asignado',
+    projectIds: ['p-1'],
+    projectTasks: { 'p-1': ['Estructuras'] },
+    records: [],
+    color: '#06b6d4',
+    position: 'Estudiante Arquitectura - Estructuras'
+  },
+  {
+    id: 'p8',
+    firstName: 'Sofía',
+    lastNamePaterno: 'Lara',
+    lastNameMaterno: '',
+    studentId: '315123463',
+    nickname: 'Sofi',
+    phone: '5512345685',
+    emergencyPhone: '5598765439',
+    email: 'sofia@correo.com',
+    brigadePeriod: '111',
+    brigade: 'Brigada 111',
+    skills: [{ id: "arq_design1", level: 3 }, { id: "arq_ts3", level: 3 }, { id: "arq_ss1", level: 3 }, { id: "arq_ss10", level: 2 }],
+    career: 'Arquitectura',
+    status: 'En Curso',
+    workStatus: 'Asignado',
+    projectIds: ['p-2'],
+    projectTasks: { 'p-2': ['Interiorismo'] },
+    records: [],
+    color: '#f43f5e',
+    position: 'Arquitecta - Interiorismo'
+  },
+  {
+    id: 'p9',
+    firstName: 'Diego',
+    lastNamePaterno: 'Navarro',
+    lastNameMaterno: '',
+    studentId: '315123464',
+    nickname: 'Dieguito',
+    phone: '5512345686',
+    emergencyPhone: '5598765440',
+    email: 'diego@correo.com',
+    brigadePeriod: '111',
+    brigade: 'Brigada 111',
+    skills: [{ id: "arq_ts4", level: 3 }, { id: "arq_ts1", level: 2 }, { id: "arq_ss2", level: 3 }, { id: "arq_ss3", level: 2 }],
+    career: 'Arquitectura',
+    status: 'En Curso',
+    workStatus: 'Asignado',
+    projectIds: ['p-1'],
+    projectTasks: { 'p-1': ['Vivienda Social'] },
+    records: [],
+    color: '#84cc16',
+    position: 'Estudiante Arquitectura - Vivienda Social'
+  },
+  {
+    id: 'p10',
+    firstName: 'Lucía',
+    lastNamePaterno: 'Méndez',
+    lastNameMaterno: '',
+    studentId: '315123465',
+    nickname: 'Lu',
+    phone: '5512345687',
+    emergencyPhone: '5598765441',
+    email: 'lucia@correo.com',
+    brigadePeriod: '111',
+    brigade: 'Brigada 111',
+    skills: [{ id: "arq_data1", level: 3 }, { id: "arq_ts4", level: 3 }, { id: "arq_ss1", level: 3 }, { id: "arq_ss5", level: 2 }],
+    career: 'Urbanismo',
+    status: 'En Curso',
+    workStatus: 'Asignado',
+    projectIds: ['p-2'],
+    projectTasks: { 'p-2': ['Planeación Urbana'] },
+    records: [],
+    color: '#6366f1',
+    position: 'Arquitecta - Planeación Urbana'
   }
 ];
 
@@ -1285,14 +1744,143 @@ const App = () => {
     return saved ? JSON.parse(saved) : DEFAULT_CATEGORIES;
   });
 
-  const [projects, setProjects] = useState(() => {
+  const [projects, setProjects] = useState<any[]>(() => {
     const saved = localStorage.getItem('app_projects');
-    return saved ? JSON.parse(saved) : DEFAULT_PROJECTS;
+    return saved ? JSON.parse(saved) : [];
   });
+
+  const [isDarkMode, setIsDarkMode] = useState(() => {
+    const saved = localStorage.getItem('app_theme');
+    return saved === 'dark';
+  });
+
+  useEffect(() => {
+    localStorage.setItem('app_theme', isDarkMode ? 'dark' : 'light');
+    if (isDarkMode) {
+      document.documentElement.classList.add('dark');
+    } else {
+      document.documentElement.classList.remove('dark');
+    }
+  }, [isDarkMode]);
+
+  const [confirmModal, setConfirmModal] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: string;
+    onConfirm: () => void;
+    confirmText?: string;
+    type?: 'danger' | 'warning' | 'info';
+  }>({
+    isOpen: false,
+    title: '',
+    message: '',
+    onConfirm: () => {},
+  });
+
+  const showConfirm = (title: string, message: string, onConfirm: () => void, type: 'danger' | 'warning' | 'info' = 'danger', confirmText: string = 'Confirmar') => {
+    setConfirmModal({
+      isOpen: true,
+      title,
+      message,
+      onConfirm,
+      type,
+      confirmText
+    });
+  };
+
+  const handleDeleteProject = async (projectId: string) => {
+    if (!projectId) {
+      toast.error('Error: ID de proyecto no encontrado');
+      return;
+    }
+
+    const project = projects.find(p => p.id === projectId);
+    if (!project) {
+      toast.error('Error: Proyecto no encontrado en el estado local');
+      return;
+    }
+
+    try {
+      // 1. Get project admins for notification
+      const admins = await getProjectAdmins(projectId);
+      
+      // 2. Delete the project document
+      await deleteDoc(doc(db, 'projects', projectId));
+      
+      // 3. Delete associated tasks
+      const tasksRef = collection(db, 'projects', projectId, 'tasks');
+      const tasksSnapshot = await getDocs(tasksRef);
+      
+      // 4. Delete associated resources
+      const resourcesRef = collection(db, 'projects', projectId, 'resources');
+      const resourcesSnapshot = await getDocs(resourcesRef);
+
+      // 5. Delete associated deletedTasks
+      const deletedTasksRef = collection(db, 'projects', projectId, 'deletedTasks');
+      const deletedTasksSnapshot = await getDocs(deletedTasksRef);
+
+      // Use batches to delete tasks, resources and deletedTasks (handling the 500 limit)
+      const allDocsToDelete = [
+        ...tasksSnapshot.docs, 
+        ...resourcesSnapshot.docs,
+        ...deletedTasksSnapshot.docs
+      ];
+      
+      for (let i = 0; i < allDocsToDelete.length; i += 500) {
+        const batch = writeBatch(db);
+        const chunk = allDocsToDelete.slice(i, i + 500);
+        chunk.forEach(doc => batch.delete(doc.ref));
+        await batch.commit();
+      }
+
+      // 5. Update local state
+      setProjects(prev => prev.filter(p => p.id !== projectId));
+      
+      // 6. Notify admins
+      const currentUserProfile = students.find(s => s.id === user?.uid) || { 
+        firstName: 'Usuario', 
+        lastNamePaterno: 'Desconocido', 
+        uid: user?.uid || '' 
+      };
+
+      for (const admin of admins) {
+        // Only notify others, not self
+        if (admin.uid !== user?.uid) {
+          await notifyProjectDeleted(admin.uid, project, currentUserProfile);
+        }
+      }
+
+      toast.success('Proyecto eliminado correctamente');
+    } catch (error) {
+      console.error('Error deleting project:', error);
+      handleFirestoreError(error, OperationType.DELETE, `projects/${projectId}`);
+    }
+  };
 
   const [view, setView] = useState('dashboard');
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [isNotificationCenterOpen, setIsNotificationCenterOpen] = useState(false);
+  
+  const handleNavigate = (projectId: string, taskId?: string) => {
+    setSelectedProjectId(projectId);
+    if (taskId) setSelectedTaskId(taskId);
+    setView('project-workspace');
+    setIsNotificationCenterOpen(false);
+    setIsMobileMenuOpen(false);
+  };
+
+  const { notifications, unreadCount, markAsRead, markAllAsRead, deleteNotification, clearAll } = useNotifications(user?.uid);
+
   const [userRole, setUserRole] = useState<'admin' | 'coordinator' | 'user'>('user');
+  const initialViewRef = useRef(false);
+
+  useEffect(() => {
+    if (userProfile && !initialViewRef.current) {
+      setView(userProfile.role === 'user' ? 'user-dashboard' : 'dashboard');
+      initialViewRef.current = true;
+    }
+  }, [userProfile]);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null); // To identify the logged-in user
   const [calendarMode, setCalendarMode] = useState('grid');
   const [selectedCalendarDate, setSelectedCalendarDate] = useState<string | null>(null);
@@ -1334,17 +1922,11 @@ const App = () => {
             const data = docSnap.data();
             setUserProfile(data);
             localStorage.setItem(`profile_${currentUser.uid}`, JSON.stringify(data));
-            setView(data.role === 'user' ? 'user-dashboard' : 'dashboard');
           } else {
-            // Check local storage fallback
-            const localProfile = localStorage.getItem(`profile_${currentUser.uid}`);
-            if (localProfile) {
-              const parsed = JSON.parse(localProfile);
-              setUserProfile(parsed);
-              setView(parsed.role === 'user' ? 'user-dashboard' : 'dashboard');
-            } else {
-              setUserProfile(null);
-            }
+            // If the document doesn't exist in Firestore, the user is new or was deleted.
+            // We MUST NOT fall back to local storage, as it would restore a deleted profile.
+            localStorage.removeItem(`profile_${currentUser.uid}`);
+            setUserProfile(null);
           }
         } catch (error: any) {
           console.error("Error loading user profile:", error);
@@ -1354,12 +1936,11 @@ const App = () => {
           if (localProfile) {
             const parsed = JSON.parse(localProfile);
             setUserProfile(parsed);
-            setView(parsed.role === 'user' ? 'user-dashboard' : 'dashboard');
           } else {
             setUserProfile(null);
           }
 
-          if (error.code === 'permission-denied') {
+          if (error.code === 'permission-denied' || error.message?.includes('Missing or insufficient permissions')) {
             toast.error('Error de permisos en Firebase. Usando datos locales si están disponibles.', {
               duration: 4000,
               id: 'firebase-permission-error'
@@ -1399,7 +1980,7 @@ const App = () => {
           r.validationStatus === 'rechazado' && r.acknowledgedRejection === false
         );
         if (unacknowledged.length > 0) {
-          setRejectedNotifications(unacknowledged);
+          setRejectedNotifications(dedupeById(unacknowledged));
         }
       }
 
@@ -1420,6 +2001,7 @@ const App = () => {
               brigadePeriod: userProfile.brigadePeriod || '2024-1',
               brigade: userProfile.brigade || '',
               skills: userProfile.skills || [],
+              skillRatings: userProfile.skillRatings || [],
               status: 'En Curso',
               workStatus: 'Sin asignar',
               projectIds: userProfile.projectIds || [],
@@ -1438,7 +2020,10 @@ const App = () => {
       try {
         const projectsSnapshot = await getDocs(collection(db, 'projects'));
         if (!projectsSnapshot.empty) {
-          const projectsData = projectsSnapshot.docs.map(doc => doc.data());
+          const projectsData = projectsSnapshot.docs.map(doc => ({
+            id: doc.id,
+            ...doc.data()
+          }));
           setProjects(projectsData);
         } else if (userRole !== 'user') {
           // If empty and admin, save defaults to Firestore
@@ -1470,7 +2055,7 @@ const App = () => {
         }
       } catch (error: any) {
         console.error("Error fetching config from Firestore:", error);
-        if (error.code === 'permission-denied') {
+        if (error.code === 'permission-denied' || error.message?.includes('Missing or insufficient permissions')) {
           console.log("Permission denied for config fetch. Auth state:", {
             user: !!user,
             userRole,
@@ -1486,33 +2071,37 @@ const App = () => {
   }, [user, userRole, loading]);
 
   useEffect(() => {
-    if (userRole !== 'user') {
-      const fetchStudents = async () => {
-        setIsLoadingStudents(true);
-        try {
-          const querySnapshot = await getDocs(collection(db, 'users'));
-          const studentsData = querySnapshot.docs.map(doc => {
-            const data = doc.data();
-            return {
-              id: doc.id,
-              ...data,
-              name: `${data.firstName || ''} ${data.lastNamePaterno || ''} ${data.lastNameMaterno || ''}`.trim() || 'Sin nombre'
-            };
-          });
-          setStudents(studentsData);
-        } catch (error) {
-          console.error("Error fetching students:", error);
-          // Only handle if it's not a permission error we already handle elsewhere
-          if (error instanceof Error && !error.message.includes('permission-denied')) {
-            handleFirestoreError(error, OperationType.LIST, 'users');
-          }
-        } finally {
-          setIsLoadingStudents(false);
+    const fetchStudents = async () => {
+      setIsLoadingStudents(true);
+      try {
+        const collectionName = userRole !== 'user' ? 'users' : 'public_profiles';
+        const querySnapshot = await getDocs(collection(db, collectionName));
+        const studentsData = querySnapshot.docs.map(doc => {
+          const data = doc.data();
+          return {
+            id: doc.id,
+            ...data,
+            name: `${data.firstName || ''} ${data.lastNamePaterno || ''} ${data.lastNameMaterno || ''}`.trim() || 'Sin nombre'
+          };
+        });
+        setStudents(studentsData);
+      } catch (error: any) {
+        console.error("Error fetching students:", error);
+        // Only handle if it's not a permission error we already handle elsewhere
+        const isPermissionError = error?.code === 'permission-denied' || (error instanceof Error && error.message.includes('Missing or insufficient permissions'));
+        if (!isPermissionError) {
+          const collectionName = userRole !== 'user' ? 'users' : 'public_profiles';
+          handleFirestoreError(error, OperationType.LIST, collectionName);
         }
-      };
+      } finally {
+        setIsLoadingStudents(false);
+      }
+    };
+    
+    if (user && userRole) {
       fetchStudents();
     }
-  }, [userRole]);
+  }, [user, userRole]);
 
   useEffect(() => {
     async function testConnection() {
@@ -1540,7 +2129,7 @@ const App = () => {
 
   const [studentForm, setStudentForm] = useState({
     firstName: '', lastNamePaterno: '', lastNameMaterno: '', nickname: '', phone: '', emergencyPhone: '', email: '', brigadePeriod: '',
-    brigade: '', skills: [] as string[],
+    brigade: '', skills: [] as string[], skillRatings: [] as SkillRating[],
     studentId: '', serviceType: 'Prestador',
     career: 'Arquitectura', status: 'En Curso', workStatus: 'Sin asignar',
     projectIds: [] as string[], projectTasks: {} as any, projectTaskHistory: {} as any,
@@ -1605,16 +2194,16 @@ const App = () => {
       if (s.email === 'mortovki@gmail.com') return false;
       const matchStatus = filterStatus === 'Todos' || s.status === filterStatus;
       const matchWork = filterWork === 'Todos' || s.workStatus === filterWork;
-      const matchProject = filterProject === 'Todos' || s.projectIds.includes(filterProject);
+      const matchProject = filterProject === 'Todos' || (s.projectIds || []).includes(filterProject);
       const matchCareer = filterCareer === 'Todos' || s.career === filterCareer;
       const matchBrigade = filterBrigade === 'Todos' || s.brigadePeriod === filterBrigade;
       const lowerSearch = searchTerm.toLowerCase();
       const hasMatchingTag = Object.values(s.projectTasks || {}).some((taskList: any) =>
-        taskList.some((tag: string) => tag.toLowerCase().includes(lowerSearch))
+        (taskList || []).some((tag: string) => (tag || '').toLowerCase().includes(lowerSearch))
       );
       const matchSearch = getFullName(s).toLowerCase().includes(lowerSearch) ||
                           (s.nickname || '').toLowerCase().includes(lowerSearch) ||
-                          s.career.toLowerCase().includes(lowerSearch) ||
+                          (s.career || '').toLowerCase().includes(lowerSearch) ||
                           hasMatchingTag;
       return matchStatus && matchWork && matchProject && matchCareer && matchBrigade && matchSearch;
     });
@@ -1838,7 +2427,7 @@ const App = () => {
     if (!student) return false;
     const newStart = toMins(startTime);
     const newEnd = toMins(endTime);
-    return (student.records || []).some((record: any) => {
+    return (student?.records || []).some((record: any) => {
       if (record.id === ignoreRecordId) return false;
       if (record.date !== date) return false;
       if (!record.startTime || !record.endTime) return false;
@@ -1899,8 +2488,10 @@ const App = () => {
           const docRef = doc(db, 'users', selectedStudentId!);
           const existingStudent = students.find(s => s.id === selectedStudentId);
           
+          const derivedSkills = studentForm.skillRatings?.map((s: any) => s.name) || studentForm.skills || [];
           const updatedData = {
             ...studentForm,
+            skills: derivedSkills,
             uid: selectedStudentId,
             role: studentForm.role || existingStudent?.role || 'user',
             createdAt: existingStudent?.createdAt || new Date().toISOString()
@@ -1923,8 +2514,10 @@ const App = () => {
         const newId = Date.now().toString();
         try {
           const docRef = doc(db, 'users', newId);
+          const derivedSkills = studentForm.skillRatings?.map((s: any) => s.name) || studentForm.skills || [];
           const newStudentData = {
             ...studentForm,
+            skills: derivedSkills,
             uid: newId,
             role: studentForm.role || 'user',
             createdAt: new Date().toISOString(),
@@ -2068,18 +2661,18 @@ const App = () => {
     setEditingRecordId(record.id);
     const isManual = !record.startTime || !record.endTime;
     setActivityForm({
-      date: record.date, 
+      date: record.date || getCDMXDateString(), 
       startTime: record.startTime || '09:00', 
       endTime: record.endTime || '13:00',
-      hours: record.hours, 
+      hours: record.hours || 0, 
       isManualHours: isManual,
-      status: record.status, 
-      categoryId: record.categoryId,
+      status: record.status || 'A', 
+      categoryId: record.categoryId || '',
       projectId: record.projectId || '',
-      description: record.description, 
+      description: record.description || '', 
       evidenceLink: record.evidenceLink || '',
       selectedStudentIds: [record.studentId], 
-      studentStatuses: { [record.studentId]: record.status }
+      studentStatuses: { [record.studentId]: record.status || 'A' }
     });
   };
 
@@ -2307,7 +2900,7 @@ const App = () => {
                      const sId = activityForm.selectedStudentIds[0] || selectedStudentId;
                      const student = students.find(s => s.id === sId);
                      if (!student) return null;
-                     return (student.projectIds || []).map((pid: string) => {
+                     return Array.from(new Set(student.projectIds || [])).map((pid: string) => {
                        const p = projects.find(pr => pr.id === pid);
                        return <option key={pid} value={pid}>{p?.name}</option>;
                      });
@@ -2402,11 +2995,11 @@ const App = () => {
           <div className="space-y-6">
             <div className="space-y-2">
               <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Evidencia</label>
-              <input type="url" disabled={isAbsence} placeholder="Link..." className="w-full p-4 border rounded-2xl" value={activityForm.evidenceLink} onChange={e => setActivityForm({...activityForm, evidenceLink: e.target.value})} />
+              <input type="url" disabled={isAbsence} placeholder="Link..." className="w-full p-4 border rounded-2xl" value={activityForm.evidenceLink || ''} onChange={e => setActivityForm({...activityForm, evidenceLink: e.target.value})} />
             </div>
             <div className="space-y-2">
               <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Descripción</label>
-              <textarea disabled={isAbsence} className="w-full p-5 border rounded-2xl h-32" value={activityForm.description} onChange={e => setActivityForm({...activityForm, description: e.target.value})}></textarea>
+              <textarea disabled={isAbsence} className="w-full p-5 border rounded-2xl h-32" value={activityForm.description || ''} onChange={e => setActivityForm({...activityForm, description: e.target.value})}></textarea>
             </div>
           </div>
         )}
@@ -2431,8 +3024,21 @@ const App = () => {
         try {
           // In this application, all user-related data (records, projectTasks, projectTaskHistory)
           // is stored directly within the user document in the 'users' collection.
-          // Therefore, deleting the document itself removes all associated data.
+          // However, notifications are in a subcollection and must be deleted separately.
+          
+          // 1. Delete notifications subcollection
+          const notifsRef = collection(db, 'users', sId, 'notifications');
+          const notifsSnap = await getDocs(notifsRef);
+          if (!notifsSnap.empty) {
+            const batch = writeBatch(db);
+            notifsSnap.docs.forEach(d => batch.delete(d.ref));
+            await batch.commit();
+          }
+
+          // 2. Delete the main user document and public profile
           await deleteDoc(doc(db, 'users', sId));
+          await deleteDoc(doc(db, 'public_profiles', sId));
+          
           showSuccessToast("Usuario y todos sus datos asociados han sido eliminados correctamente");
         } catch (error) {
           console.error("Error deleting user from Firestore:", error);
@@ -2453,9 +3059,12 @@ const App = () => {
     try {
       const docRef = doc(db, 'users', user.uid);
       
+      const derivedSkills = editingProfileForm.skillRatings?.map((s: any) => s.name) || editingProfileForm.skills || [];
+
       const updatedProfile = {
         ...userProfile,
         ...editingProfileForm,
+        skills: derivedSkills,
         role: userProfile.role || 'user',
         status: userProfile.status || 'En Curso',
         career: userProfile.career || 'Arquitectura',
@@ -2465,6 +3074,19 @@ const App = () => {
       };
 
       await setDoc(docRef, updatedProfile, { merge: true });
+      
+      // Sync to public_profiles
+      const publicProfile = {
+        firstName: updatedProfile.firstName,
+        lastNamePaterno: updatedProfile.lastNamePaterno,
+        lastNameMaterno: updatedProfile.lastNameMaterno,
+        career: updatedProfile.career,
+        skills: updatedProfile.skills,
+        status: updatedProfile.status,
+        role: updatedProfile.role,
+        uid: updatedProfile.uid
+      };
+      await setDoc(doc(db, 'public_profiles', user.uid), publicProfile, { merge: true });
       
       setUserProfile(updatedProfile);
       localStorage.setItem(`profile_${user.uid}`, JSON.stringify(updatedProfile));
@@ -2479,6 +3101,8 @@ const App = () => {
     }
   };
 
+  const { breakpoint } = useBreakpoint();
+
   if (loading) return (
     <div className="min-h-screen flex items-center justify-center bg-slate-50">
       <div className="flex flex-col items-center gap-4">
@@ -2490,6 +3114,8 @@ const App = () => {
   if (!user) return <Login />;
   if (!userProfile) return <ProfileForm user={user} onComplete={(profile) => {
     setUserProfile(profile);
+    setUserRole(profile.role || 'user');
+    setCurrentUserId(profile.uid || null);
     setView(profile.role === 'user' ? 'user-dashboard' : 'dashboard');
   }} />;
 
@@ -2504,184 +3130,158 @@ const App = () => {
         }}
         toastOptions={{
           duration: 5000,
+          style: isDarkMode ? {
+            background: '#1a1a1a',
+            color: '#fff',
+            border: '1px solid rgba(255,255,255,0.1)',
+            borderRadius: '1rem',
+            fontSize: '12px',
+            fontWeight: 'bold',
+            textTransform: 'uppercase',
+            letterSpacing: '0.1em'
+          } : {
+            borderRadius: '1rem',
+            fontSize: '12px',
+            fontWeight: 'bold',
+            textTransform: 'uppercase',
+            letterSpacing: '0.1em'
+          }
         }}
       />
-      <div className="flex min-h-screen bg-slate-50 font-sans text-slate-900 selection:bg-indigo-100 overflow-x-hidden">
-      <Sidebar 
-        view={view} 
-        setView={setView} 
-        setEditingRecordId={setEditingRecordId} 
-        userRole={userRole} 
-        setUserRole={setUserRole} 
-        setCurrentUserId={setCurrentUserId} 
-        currentUserId={currentUserId}
-        firstStudentId={students[0]?.id} 
-        user={user} 
-        students={students}
-        projects={projects}
-        setSelectedProjectId={setSelectedProjectId}
-        selectedProjectId={selectedProjectId}
-        onOpenProfile={() => {
-          setEditingProfileForm({
-            firstName: userProfile.firstName || '',
-            lastNamePaterno: userProfile.lastNamePaterno || '',
-            lastNameMaterno: userProfile.lastNameMaterno || '',
-            email: userProfile.email || '',
-            phone: userProfile.phone || '',
-            emergencyPhone: userProfile.emergencyPhone || '',
-            skills: userProfile.skills || [],
-            brigadePeriod: userProfile.brigadePeriod || '',
-            studentId: userProfile.studentId || '',
-            career: userProfile.career || '',
-            status: userProfile.status || 'En Curso',
-          });
-          setShowProfileModal(true);
-        }}
+      <ConfirmModal
+        isOpen={confirmModal.isOpen}
+        onClose={() => setConfirmModal(prev => ({ ...prev, isOpen: false }))}
+        onConfirm={confirmModal.onConfirm}
+        title={confirmModal.title}
+        message={confirmModal.message}
+        confirmText={confirmModal.confirmText}
+        type={confirmModal.type}
+        isDarkMode={isDarkMode}
       />
-      <div className="flex-1 flex flex-col min-w-0">
-        {/* Navbar Móvil */}
-        <div className="lg:hidden bg-slate-900 text-white p-4 flex justify-between items-center shadow-lg border-b border-white/5 sticky top-0 z-[60]">
-          <div className="flex items-center gap-2">
-            <button 
-              onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
-              className="p-2 hover:bg-slate-800 rounded-lg transition-colors"
-            >
-              {isMobileMenuOpen ? <X size={24} /> : <List size={24} />}
-            </button>
-            <div className="flex items-center gap-2">
-              <GraduationCap size={20} className="text-indigo-400" />
-              <h1 className="font-black text-[10px] uppercase tracking-tighter leading-none">Asistencia<br/><span className="text-indigo-400">Prestadores</span></h1>
-            </div>
-          </div>
-          <div className="flex items-center gap-4">
-            <button 
-              onClick={() => { setView(userRole !== 'user' ? 'dashboard' : 'user-dashboard'); setIsMobileMenuOpen(false); }}
-              className={`p-2 rounded-lg ${view === 'dashboard' || view === 'user-dashboard' ? 'bg-indigo-600' : ''}`}
-            >
-              <LayoutDashboard size={20} />
-            </button>
-            <div 
-              className="w-8 h-8 rounded-full bg-indigo-500 flex items-center justify-center font-black text-xs cursor-pointer"
-              onClick={() => {
-                setEditingProfileForm({
-                  firstName: userProfile.firstName || '',
-                  lastNamePaterno: userProfile.lastNamePaterno || '',
-                  lastNameMaterno: userProfile.lastNameMaterno || '',
-                  email: userProfile.email || '',
-                  phone: userProfile.phone || '',
-                  emergencyPhone: userProfile.emergencyPhone || '',
-                  skills: userProfile.skills || [],
-                  brigadePeriod: userProfile.brigadePeriod || '',
-                  studentId: userProfile.studentId || '',
-                  career: userProfile.career || '',
-                  status: userProfile.status || 'En Curso',
-                });
-                setShowProfileModal(true);
-                setIsMobileMenuOpen(false);
-              }}
-            >
-              {user?.displayName?.charAt(0) || 'U'}
-            </div>
-          </div>
-        </div>
-
-        {/* Menú Móvil Overlay */}
-        {isMobileMenuOpen && (
-          <div className="fixed inset-0 bg-slate-900/95 z-[70] lg:hidden animate-in fade-in duration-300">
-            <div className="flex flex-col h-full p-8">
-              <div className="flex justify-between items-center mb-12">
-                <div className="flex items-center gap-3">
-                  <div className="bg-indigo-500 p-2 rounded-lg text-white">
-                    <GraduationCap size={24} />
-                  </div>
-                  <h1 className="font-bold text-sm uppercase tracking-widest text-indigo-100">Menú Principal</h1>
-                </div>
-                <button onClick={() => setIsMobileMenuOpen(false)} className="p-2 text-slate-400 hover:text-white">
-                  <X size={32} />
-                </button>
-              </div>
-
-              <div className="flex-1 space-y-4">
-                {userRole !== 'user' ? (
-                  <>
-                    <div className="space-y-2">
-                      <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest px-6 mb-2">Vista Admin</p>
-                      <button
-                        onClick={() => { setView('dashboard'); setIsMobileMenuOpen(false); }}
-                        className={`w-full flex items-center gap-4 px-6 py-5 rounded-2xl transition-all ${view === 'dashboard' ? 'bg-indigo-600 text-white shadow-xl' : 'text-slate-400 hover:text-white hover:bg-slate-800'}`}
-                      >
-                        <LayoutDashboard size={24} /> <span className="font-bold text-lg">Dashboard Admin</span>
-                      </button>
-                      <button
-                        onClick={() => { setView('calendar'); setIsMobileMenuOpen(false); }}
-                        className={`w-full flex items-center gap-4 px-6 py-5 rounded-2xl transition-all ${view === 'calendar' ? 'bg-indigo-600 text-white shadow-xl' : 'text-slate-400 hover:text-white hover:bg-slate-800'}`}
-                      >
-                        <CalendarDays size={24} /> <span className="font-bold text-lg">Calendario</span>
-                      </button>
-                      <button
-                        onClick={() => { setSelectedProjectId(null); setView('project-directory'); setIsMobileMenuOpen(false); }}
-                        className={`w-full flex items-center gap-4 px-6 py-5 rounded-2xl transition-all ${view === 'project-directory' ? 'bg-indigo-600 text-white shadow-xl' : 'text-slate-400 hover:text-white hover:bg-slate-800'}`}
-                      >
-                        <Briefcase size={24} /> <span className="font-bold text-lg">Directorio</span>
-                      </button>
-                      <button
-                        onClick={() => { setView('categories'); setIsMobileMenuOpen(false); }}
-                        className={`w-full flex items-center gap-4 px-6 py-5 rounded-2xl transition-all ${view === 'categories' ? 'bg-indigo-600 text-white shadow-xl' : 'text-slate-400 hover:text-white hover:bg-slate-800'}`}
-                      >
-                        <Tag size={24} /> <span className="font-bold text-lg">Configuración</span>
-                      </button>
-                    </div>
-                    
-                    {user?.email !== 'mortovki@gmail.com' && (
-                      <div className="space-y-2 pt-4 border-t border-slate-800">
-                        <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest px-6 mb-2">Vista Usuario</p>
-                        <button
-                          onClick={() => { setView('user-dashboard'); setIsMobileMenuOpen(false); }}
-                          className={`w-full flex items-center gap-4 px-6 py-5 rounded-2xl transition-all ${view === 'user-dashboard' ? 'bg-indigo-600 text-white shadow-xl' : 'text-slate-400 hover:text-white hover:bg-slate-800'}`}
-                        >
-                          <History size={24} /> <span className="font-bold text-lg">Mi Progreso</span>
-                        </button>
-                      </div>
-                    )}
-                  </>
-                ) : (
-                  <>
-                    <button
-                      onClick={() => { setView('user-dashboard'); setIsMobileMenuOpen(false); }}
-                      className={`w-full flex items-center gap-4 px-6 py-5 rounded-2xl transition-all ${view === 'user-dashboard' ? 'bg-indigo-600 text-white shadow-xl' : 'text-slate-400 hover:text-white hover:bg-slate-800'}`}
-                    >
-                      <LayoutDashboard size={24} /> <span className="font-bold text-lg">Mi Progreso</span>
-                    </button>
-                    <button
-                      onClick={() => { setView('calendar'); setIsMobileMenuOpen(false); }}
-                      className={`w-full flex items-center gap-4 px-6 py-5 rounded-2xl transition-all ${view === 'calendar' ? 'bg-indigo-600 text-white shadow-xl' : 'text-slate-400 hover:text-white hover:bg-slate-800'}`}
-                    >
-                      <CalendarDays size={24} /> <span className="font-bold text-lg">Calendario</span>
-                    </button>
-                    <button
-                      onClick={() => { setSelectedProjectId(null); setView('project-directory'); setIsMobileMenuOpen(false); }}
-                      className={`w-full flex items-center gap-4 px-6 py-5 rounded-2xl transition-all ${view === 'project-directory' ? 'bg-indigo-600 text-white shadow-xl' : 'text-slate-400 hover:text-white hover:bg-slate-800'}`}
-                    >
-                      <Briefcase size={24} /> <span className="font-bold text-lg">Directorio</span>
-                    </button>
-                  </>
-                )}
-              </div>
-
-              <div className="pt-8 border-t border-slate-800 space-y-4">
-                <button 
-                  onClick={() => auth.signOut()}
-                  className="w-full flex items-center justify-center gap-3 px-6 py-5 rounded-2xl bg-red-500/10 text-red-500 font-bold text-lg"
-                >
-                  Cerrar Sesión
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
+      <div className={`flex min-h-screen font-sans selection:bg-indigo-100 overflow-x-hidden transition-colors ${isDarkMode ? 'bg-[#0a0a0a] text-white' : 'bg-slate-50 text-slate-900'}`}>
+        <Sidebar 
+          view={view} 
+          setView={setView} 
+          setEditingRecordId={setEditingRecordId} 
+          userRole={userRole} 
+          setUserRole={setUserRole} 
+          setCurrentUserId={setCurrentUserId} 
+          currentUserId={currentUserId}
+          firstStudentId={students[0]?.id} 
+          user={user} 
+          students={students}
+          projects={projects}
+          setSelectedProjectId={setSelectedProjectId}
+          selectedProjectId={selectedProjectId}
+          unreadNotifications={unreadCount}
+          onOpenNotifications={() => setIsNotificationCenterOpen(true)}
+          onOpenProfile={() => {
+            setEditingProfileForm({
+              ...userProfile,
+              firstName: userProfile.firstName || '',
+              lastNamePaterno: userProfile.lastNamePaterno || '',
+              lastNameMaterno: userProfile.lastNameMaterno || '',
+              email: userProfile.email || '',
+              phone: userProfile.phone || '',
+              emergencyPhone: userProfile.emergencyPhone || '',
+              skills: userProfile.skills || [],
+              skillRatings: userProfile.skillRatings || [],
+              brigadePeriod: userProfile.brigadePeriod || '',
+              studentId: userProfile.studentId || '',
+              career: userProfile.career || '',
+              status: userProfile.status || 'En Curso',
+            });
+            setShowProfileModal(true);
+          }}
+          isDarkMode={isDarkMode}
+          isMobileMenuOpen={isMobileMenuOpen}
+          setIsMobileMenuOpen={setIsMobileMenuOpen}
+        />
         
-        <main className="p-4 sm:p-8 lg:p-12 max-w-7xl mx-auto w-full flex-1 animate-in fade-in duration-700 overflow-x-hidden">
-          {view === 'user-dashboard' && currentUserId && (
+        <div className="flex-1 flex flex-col min-w-0 relative">
+          {/* Global Header - Responsive */}
+          <header className={`${isDarkMode ? 'bg-[#121212] border-white/10' : 'bg-white border-slate-200'} border-b px-4 sm:px-6 lg:px-8 py-3 flex items-center justify-between z-40 sticky top-0 ${breakpoint === 'mobile' ? 'h-16' : 'h-14 lg:h-16'}`}>
+            <div className="flex items-center gap-3">
+              {breakpoint === 'mobile' && (
+                <button 
+                  onClick={() => setIsMobileMenuOpen(true)}
+                  className={`p-2 rounded-xl transition-colors ${isDarkMode ? 'text-gray-400 hover:bg-white/5' : 'text-slate-500 hover:bg-slate-100'}`}
+                >
+                  <Menu size={24} />
+                </button>
+              )}
+              
+              {/* Project Title if in workspace */}
+              {view === 'project-workspace' && selectedProjectId ? (
+                <div className="flex items-center gap-2 min-w-0">
+                  <h1 className={`font-black truncate max-w-[140px] sm:max-w-xs uppercase tracking-tight ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>
+                    {projects.find(p => p.id === selectedProjectId)?.name}
+                  </h1>
+                  <div className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse shrink-0" />
+                </div>
+              ) : (
+                <h1 className={`font-black uppercase tracking-tight truncate max-w-[240px] sm:max-w-none ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>
+                  {view === 'dashboard' ? 'Dashboard' : view === 'validation' ? 'Validación' : view === 'user-dashboard' ? 'Mi Progreso' : (view === 'skill-map' || view === 'skills') ? 'Mapa de Habilidades' : 'Directorio'}
+                </h1>
+              )}
+            </div>
+
+            <div className="flex items-center gap-1 sm:gap-3">
+              <button 
+                onClick={() => setIsDarkMode(!isDarkMode)}
+                className={`p-2 rounded-xl transition-all ${isDarkMode ? 'text-yellow-400 hover:bg-white/5' : 'text-slate-400 hover:text-indigo-600 hover:bg-indigo-50'}`}
+                title={isDarkMode ? "Modo Claro" : "Modo Oscuro"}
+              >
+                {isDarkMode ? <Sun size={20} /> : <Moon size={20} />}
+              </button>
+
+              <button 
+                onClick={() => setIsNotificationCenterOpen(true)}
+                className={`p-2 rounded-xl transition-all relative group ${isDarkMode ? 'text-gray-400 hover:bg-white/5' : 'text-slate-400 hover:text-indigo-600 hover:bg-indigo-50'}`}
+              >
+                <Bell size={20} className="group-hover:rotate-12 transition-transform" />
+                {unreadCount > 0 && (
+                  <span className="absolute top-1.5 right-1.5 w-4 h-4 bg-red-500 text-white text-[9px] font-black flex items-center justify-center rounded-full border-2 border-white shadow-sm">
+                    {unreadCount > 9 ? '9+' : unreadCount}
+                  </span>
+                )}
+              </button>
+              
+              <button 
+                onClick={() => {
+                  setEditingProfileForm({
+                    ...userProfile,
+                    firstName: userProfile.firstName || '',
+                    lastNamePaterno: userProfile.lastNamePaterno || '',
+                    lastNameMaterno: userProfile.lastNameMaterno || '',
+                    email: userProfile.email || '',
+                    phone: userProfile.phone || '',
+                    emergencyPhone: userProfile.emergencyPhone || '',
+                    skills: userProfile.skills || [],
+                    skillRatings: userProfile.skillRatings || [],
+                    brigadePeriod: userProfile.brigadePeriod || '',
+                    studentId: userProfile.studentId || '',
+                    career: userProfile.career || '',
+                    status: userProfile.status || 'En Curso',
+                  });
+                  setShowProfileModal(true);
+                }}
+                className="flex items-center gap-2 p-1 pr-3 hover:bg-slate-100 rounded-xl transition-all group"
+              >
+                <div className="w-8 h-8 rounded-lg bg-indigo-500 flex items-center justify-center text-white font-black text-xs">
+                  {user?.displayName?.charAt(0) || 'U'}
+                </div>
+                {breakpoint !== 'mobile' && (
+                  <span className="text-xs font-bold text-slate-600 group-hover:text-slate-900 transition-colors">
+                    {user?.displayName?.split(' ')[0] || 'Perfil'}
+                  </span>
+                )}
+              </button>
+            </div>
+          </header>
+
+          <main className={`flex-1 w-full animate-in fade-in duration-700 overflow-x-hidden ${view === 'skill-map' ? 'h-full' : (breakpoint === 'mobile' ? 'p-4' : 'p-4 sm:p-6 lg:p-12 max-w-7xl mx-auto')}`}>
+            {view === 'user-dashboard' && currentUserId && (
             isLoadingStudents ? (
               <div className="space-y-8 animate-pulse">
                 <div className="h-12 bg-slate-100 rounded-2xl w-1/4"></div>
@@ -2692,7 +3292,9 @@ const App = () => {
               </div>
             ) : (
               <UserDashboard 
-                student={students.find(s => s.id === currentUserId)} 
+                student={students.find(s => s.id === currentUserId) || 
+                         (userProfile?.uid === currentUserId ? { ...userProfile, id: userProfile.uid } : null) ||
+                         (userProfile ? { ...userProfile, id: userProfile.uid } : null)} 
                 setStudents={setStudents} 
                 userRole={userRole} 
                 categories={categories}
@@ -2705,6 +3307,7 @@ const App = () => {
                 handleDeleteSelected={handleDeleteSelected}
                 setView={setView}
                 setSelectedProjectId={setSelectedProjectId}
+                isDarkMode={isDarkMode}
               />
             )
           )}
@@ -2722,6 +3325,7 @@ const App = () => {
               <ProjectDirectory 
                 projects={projects}
                 setProjects={setProjects}
+                onDeleteProject={handleDeleteProject}
                 userRole={userRole}
                 selectedProjectId={selectedProjectId}
                 enrolledProjectIds={userRole === 'user' ? (students.find(s => s.id === currentUserId)?.projectIds?.length > 0 ? students.find(s => s.id === currentUserId)?.projectIds : ['p-general']) : null}
@@ -2729,6 +3333,7 @@ const App = () => {
                   setSelectedProjectId(id);
                   setView('project-workspace');
                 }}
+                isDarkMode={isDarkMode}
               />
             )
           )}
@@ -2748,6 +3353,7 @@ const App = () => {
                 setStudents={setStudents}
                 categories={categories}
                 projects={projects}
+                isDarkMode={isDarkMode}
               />
             )
           )}
@@ -2758,75 +3364,96 @@ const App = () => {
               userRole={userRole}
               currentUser={user}
               students={students}
-              onBack={() => setView('project-directory')}
+              initialTaskId={selectedTaskId}
+              onBack={() => {
+                setSelectedProjectId(null);
+                setSelectedTaskId(null);
+                setView('project-directory');
+              }}
+              isDarkMode={isDarkMode}
+              onOpenNotifications={() => setIsNotificationCenterOpen(true)}
+              unreadNotifications={unreadCount}
+            />
+          )}
+          {view === 'skills' && (
+            <SkillsView 
+              users={students}
+              currentUserRole={userRole}
+              currentUserId={user?.uid || ''}
+              projects={projects}
+              isDarkMode={isDarkMode}
             />
           )}
           {view === 'dashboard' && (
             <div className="space-y-6 sm:space-y-10">
               <div className="flex flex-col xl:flex-row justify-between items-start xl:items-center gap-6 sm:gap-8">
                 <div>
-                  <h2 className="text-3xl sm:text-5xl font-black text-slate-900 tracking-tighter">Prestadores</h2>
-                  <p className="text-slate-500 font-medium mt-1 uppercase text-[9px] sm:text-[11px] tracking-[0.2em] italic">Sistema central de seguimiento y control de horas</p>
+                  <h2 className={`text-3xl sm:text-5xl font-black tracking-tighter ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>Prestadores</h2>
+                  <p className={`${isDarkMode ? 'text-gray-500' : 'text-slate-500'} font-medium mt-1 uppercase text-[9px] sm:text-[11px] tracking-[0.2em] italic`}>Sistema central de seguimiento y control de horas</p>
                 </div>
-                <div className="flex flex-wrap gap-3 sm:gap-4 w-full sm:w-auto">
-                  <button onClick={() => { setSelectedProjectId(null); setView('project-directory'); }} className="flex-1 sm:flex-none bg-indigo-50 text-indigo-600 px-4 py-3 sm:px-6 sm:py-3 rounded-xl sm:rounded-2xl flex items-center justify-center gap-2 sm:gap-3 font-black text-[10px] sm:text-xs uppercase tracking-widest sm:tracking-[0.2em] shadow-sm hover:bg-indigo-100 transition-all active:scale-95"><Briefcase size={18} /> Directorio</button>
-                  <button onClick={() => { setActivityForm(prev => ({...prev, selectedStudentIds: []})); setView('individual-activity'); }} className="flex-1 sm:flex-none bg-white border-2 sm:border-4 border-slate-100 px-4 py-3 sm:px-6 sm:py-3 rounded-xl sm:rounded-2xl flex items-center justify-center gap-2 sm:gap-3 font-black text-[10px] sm:text-xs uppercase tracking-widest sm:tracking-[0.2em] shadow-sm hover:bg-slate-50 transition-all active:scale-95"><PlusCircle size={18} className="text-indigo-500" /> Individual</button>
-                  <button onClick={() => setView('group-activity')} className="flex-1 sm:flex-none bg-emerald-600 text-white px-4 py-3 sm:px-6 sm:py-3 rounded-xl sm:rounded-2xl flex items-center justify-center gap-2 sm:gap-3 font-black text-[10px] sm:text-xs uppercase tracking-widest sm:tracking-[0.2em] shadow-xl shadow-emerald-600/20 hover:bg-emerald-700 transition-all active:scale-95"><Users size={18} /> Grupal</button>
-                  <button onClick={() => { setShowEditStudent(false); setStudentForm({ firstName: '', lastNamePaterno: '', lastNameMaterno: '', studentId: '', serviceType: 'Prestador', nickname: '', phone: '', emergencyPhone: '', email: '', brigadePeriod: '', brigade: '', skills: [], career: 'Arquitectura', status: 'En Curso', workStatus: 'Sin asignar', projectIds: [], projectTasks: {}, projectTaskHistory: {}, role: 'user' }); setStudentFormErrors({}); setShowAddStudent(true); }} className="w-full sm:w-auto bg-indigo-600 text-white px-6 py-3 rounded-xl sm:rounded-2xl flex items-center justify-center gap-3 font-black text-[10px] sm:text-xs uppercase tracking-widest sm:tracking-[0.2em] shadow-xl shadow-indigo-600/30 hover:bg-indigo-700 transition-all active:scale-95"><UserPlus size={18} /> Nuevo Alumno</button>
+                <div className="flex flex-col sm:flex-row flex-wrap gap-3 sm:gap-4 w-full sm:w-auto">
+                  <button onClick={() => { setSelectedProjectId(null); setView('project-directory'); }} className={`w-full sm:w-auto px-4 py-3 sm:px-6 sm:py-3 rounded-xl sm:rounded-2xl flex items-center justify-center gap-2 sm:gap-3 font-black text-[10px] sm:text-xs uppercase tracking-widest sm:tracking-[0.2em] shadow-sm transition-all active:scale-95 ${isDarkMode ? 'bg-white/5 text-white hover:bg-white/10' : 'bg-indigo-50 text-indigo-600 hover:bg-indigo-100'}`}><Briefcase size={18} /> Directorio</button>
+                  {userRole === 'admin' && (
+                    <>
+                      <button onClick={() => { setActivityForm(prev => ({...prev, selectedStudentIds: []})); setView('individual-activity'); }} className={`w-full sm:w-auto px-4 py-3 sm:px-6 sm:py-3 rounded-xl sm:rounded-2xl flex items-center justify-center gap-2 sm:gap-3 font-black text-[10px] sm:text-xs uppercase tracking-widest sm:tracking-[0.2em] shadow-sm transition-all active:scale-95 ${isDarkMode ? 'bg-white/5 border-white/10 text-white hover:bg-white/10' : 'bg-white border-2 sm:border-4 border-slate-100 text-slate-700 hover:bg-slate-50'}`}><PlusCircle size={18} className="text-indigo-500" /> Individual</button>
+                      <button onClick={() => setView('group-activity')} className="w-full sm:w-auto bg-emerald-600 text-white px-4 py-3 sm:px-6 sm:py-3 rounded-xl sm:rounded-2xl flex items-center justify-center gap-2 sm:gap-3 font-black text-[10px] sm:text-xs uppercase tracking-widest sm:tracking-[0.2em] shadow-xl shadow-emerald-600/20 hover:bg-emerald-700 transition-all active:scale-95"><Users size={18} /> Grupal</button>
+                      <button onClick={() => { setShowEditStudent(false); setStudentForm({ firstName: '', lastNamePaterno: '', lastNameMaterno: '', studentId: '', serviceType: 'Prestador', nickname: '', phone: '', emergencyPhone: '', email: '', brigadePeriod: '', brigade: '', skills: [], skillRatings: [], career: 'Arquitectura', status: 'En Curso', workStatus: 'Sin asignar', projectIds: [], projectTasks: {}, projectTaskHistory: {}, role: 'user' }); setStudentFormErrors({}); setShowAddStudent(true); }} className="w-full sm:w-auto bg-indigo-600 text-white px-6 py-3 rounded-xl sm:rounded-2xl flex items-center justify-center gap-3 font-black text-[10px] sm:text-xs uppercase tracking-widest sm:tracking-[0.2em] shadow-xl shadow-indigo-600/30 hover:bg-indigo-700 transition-all active:scale-95"><UserPlus size={18} /> Nuevo Alumno</button>
+                    </>
+                  )}
                 </div>
               </div>
 
               {/* Filtros */}
-              <div className="bg-white p-6 sm:p-8 rounded-[2rem] sm:rounded-[2.5rem] border border-slate-200 shadow-sm flex flex-col gap-4 sm:gap-6">
+              <div className={`${isDarkMode ? 'bg-white/5 border-white/10' : 'bg-white border-slate-200'} p-6 sm:p-8 rounded-[2rem] sm:rounded-[2.5rem] border shadow-sm flex flex-col gap-4 sm:gap-6`}>
                 <div className="flex justify-between items-center">
-                  <span className="text-[9px] sm:text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Búsqueda y Filtros</span>
-                  <span className="bg-indigo-50 text-indigo-600 px-3 py-1 rounded-full text-[9px] sm:text-[10px] font-black uppercase tracking-widest">
+                  <span className={`text-[9px] sm:text-[10px] font-black uppercase tracking-widest ml-1 ${isDarkMode ? 'text-gray-500' : 'text-slate-400'}`}>Búsqueda y Filtros</span>
+                  <span className={`${isDarkMode ? 'bg-white/10 text-white' : 'bg-indigo-50 text-indigo-600'} px-3 py-1 rounded-full text-[9px] sm:text-[10px] font-black uppercase tracking-widest`}>
                     {filteredStudents.length} {filteredStudents.length === 1 ? 'Alumno' : 'Alumnos'}
                   </span>
                 </div>
                 <div className="w-full relative">
                   <Search className="absolute left-4 sm:left-5 top-1/2 -translate-y-1/2 text-slate-300" size={20} />
-                  <input type="text" placeholder="Nombre del alumno, carrera o etiqueta..." className="w-full pl-12 sm:pl-14 pr-6 py-3 sm:py-4 rounded-xl sm:rounded-[1.5rem] bg-slate-50 border border-slate-100 text-xs sm:text-sm font-bold outline-none focus:bg-white focus:ring-4 focus:ring-indigo-500/10 transition-all" value={searchTerm} onChange={e => setSearchTerm(e.target.value)} />
+                  <input type="text" placeholder="Nombre del alumno, carrera o etiqueta..." className={`w-full pl-12 sm:pl-14 pr-6 py-3 sm:py-4 rounded-xl sm:rounded-[1.5rem] border text-xs sm:text-sm font-bold outline-none transition-all ${isDarkMode ? 'bg-white/5 border-white/10 text-white focus:bg-white/10 focus:ring-white/5' : 'bg-slate-50 border-slate-100 text-slate-900 focus:bg-white focus:ring-indigo-500/10'}`} value={searchTerm} onChange={e => setSearchTerm(e.target.value)} />
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-3 sm:gap-4 w-full">
                   <div className="space-y-1 sm:space-y-2">
-                    <span className="text-[8px] sm:text-[9px] font-black text-slate-400 uppercase tracking-widest ml-1">Proyecto</span>
-                    <select className="w-full bg-slate-50 px-3 py-2 sm:px-4 sm:py-3 rounded-lg sm:rounded-[1.2rem] border border-slate-100 text-[9px] sm:text-[10px] font-black uppercase outline-none focus:bg-white transition-all shadow-sm" value={filterProject} onChange={e => setFilterProject(e.target.value)}>
+                    <span className={`text-[8px] sm:text-[9px] font-black uppercase tracking-widest ml-1 ${isDarkMode ? 'text-gray-500' : 'text-slate-400'}`}>Proyecto</span>
+                    <select className={`w-full px-3 py-2 sm:px-4 sm:py-3 rounded-lg sm:rounded-[1.2rem] border text-[9px] sm:text-[10px] font-black uppercase outline-none transition-all shadow-sm ${isDarkMode ? 'bg-white/5 border-white/10 text-white focus:bg-white/10' : 'bg-slate-50 border-slate-100 text-slate-900 focus:bg-white'}`} value={filterProject} onChange={e => setFilterProject(e.target.value)}>
                       <option value="Todos">TODOS</option>
                       {projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
                     </select>
                   </div>
                   <div className="space-y-1 sm:space-y-2">
-                    <span className="text-[8px] sm:text-[9px] font-black text-slate-400 uppercase tracking-widest ml-1">Carrera</span>
-                    <select className="w-full bg-slate-50 px-3 py-2 sm:px-4 sm:py-3 rounded-lg sm:rounded-[1.2rem] border border-slate-100 text-[9px] sm:text-[10px] font-black uppercase outline-none focus:bg-white transition-all shadow-sm" value={filterCareer} onChange={e => setFilterCareer(e.target.value)}>
+                    <span className={`text-[8px] sm:text-[9px] font-black uppercase tracking-widest ml-1 ${isDarkMode ? 'text-gray-500' : 'text-slate-400'}`}>Carrera</span>
+                    <select className={`w-full px-3 py-2 sm:px-4 sm:py-3 rounded-lg sm:rounded-[1.2rem] border text-[9px] sm:text-[10px] font-black uppercase outline-none transition-all shadow-sm ${isDarkMode ? 'bg-white/5 border-white/10 text-white focus:bg-white/10' : 'bg-slate-50 border-slate-100 text-slate-900 focus:bg-white'}`} value={filterCareer} onChange={e => setFilterCareer(e.target.value)}>
                       <option value="Todos">TODAS</option>
                       {uniqueCareers.map(c => <option key={c} value={c}>{c}</option>)}
                     </select>
                   </div>
                   <div className="space-y-1 sm:space-y-2">
-                    <span className="text-[8px] sm:text-[9px] font-black text-slate-400 uppercase tracking-widest ml-1">Brigada</span>
-                    <select className="w-full bg-slate-50 px-3 py-2 sm:px-4 sm:py-3 rounded-lg sm:rounded-[1.2rem] border border-slate-100 text-[9px] sm:text-[10px] font-black uppercase outline-none focus:bg-white transition-all shadow-sm" value={filterBrigade} onChange={e => setFilterBrigade(e.target.value)}>
+                    <span className={`text-[8px] sm:text-[9px] font-black uppercase tracking-widest ml-1 ${isDarkMode ? 'text-gray-500' : 'text-slate-400'}`}>Brigada</span>
+                    <select className={`w-full px-3 py-2 sm:px-4 sm:py-3 rounded-lg sm:rounded-[1.2rem] border text-[9px] sm:text-[10px] font-black uppercase outline-none transition-all shadow-sm ${isDarkMode ? 'bg-white/5 border-white/10 text-white focus:bg-white/10' : 'bg-slate-50 border-slate-100 text-slate-900 focus:bg-white'}`} value={filterBrigade} onChange={e => setFilterBrigade(e.target.value)}>
                       <option value="Todos">TODAS</option>
                       {uniqueBrigades.map(b => <option key={b} value={b}>{b}</option>)}
                     </select>
                   </div>
                   <div className="space-y-1 sm:space-y-2">
-                    <span className="text-[8px] sm:text-[9px] font-black text-slate-400 uppercase tracking-widest ml-1">Estatus Acad.</span>
-                    <select className="w-full bg-slate-50 px-3 py-2 sm:px-4 sm:py-3 rounded-lg sm:rounded-[1.2rem] border border-slate-100 text-[9px] sm:text-[10px] font-black uppercase outline-none focus:bg-white transition-all shadow-sm" value={filterStatus} onChange={e => setFilterStatus(e.target.value)}>
+                    <span className={`text-[8px] sm:text-[9px] font-black uppercase tracking-widest ml-1 ${isDarkMode ? 'text-gray-500' : 'text-slate-400'}`}>Estatus Acad.</span>
+                    <select className={`w-full px-3 py-2 sm:px-4 sm:py-3 rounded-lg sm:rounded-[1.2rem] border text-[9px] sm:text-[10px] font-black uppercase outline-none transition-all shadow-sm ${isDarkMode ? 'bg-white/5 border-white/10 text-white focus:bg-white/10' : 'bg-slate-50 border-slate-100 text-slate-900 focus:bg-white'}`} value={filterStatus} onChange={e => setFilterStatus(e.target.value)}>
                       <option value="Todos">TODOS</option>
                       {Object.keys(STUDENT_STATUS).map(s => <option key={s} value={s}>{s}</option>)}
                     </select>
                   </div>
                   <div className="space-y-1 sm:space-y-2">
-                    <span className="text-[8px] sm:text-[9px] font-black text-slate-400 uppercase tracking-widest ml-1">Carga Trabajo</span>
-                    <select className="w-full bg-slate-50 px-3 py-2 sm:px-4 sm:py-3 rounded-lg sm:rounded-[1.2rem] border border-slate-100 text-[9px] sm:text-[10px] font-black uppercase outline-none focus:bg-white transition-all shadow-sm" value={filterWork} onChange={e => setFilterWork(e.target.value)}>
+                    <span className={`text-[8px] sm:text-[9px] font-black uppercase tracking-widest ml-1 ${isDarkMode ? 'text-gray-500' : 'text-slate-400'}`}>Carga Trabajo</span>
+                    <select className={`w-full px-3 py-2 sm:px-4 sm:py-3 rounded-lg sm:rounded-[1.2rem] border text-[9px] sm:text-[10px] font-black uppercase outline-none transition-all shadow-sm ${isDarkMode ? 'bg-white/5 border-white/10 text-white focus:bg-white/10' : 'bg-slate-50 border-slate-100 text-slate-900 focus:bg-white'}`} value={filterWork} onChange={e => setFilterWork(e.target.value)}>
                       <option value="Todos">TODOS</option>
                       {Object.keys(WORK_STATUS).map(w => <option key={w} value={w}>{w}</option>)}
                     </select>
                   </div>
                   <div className="space-y-1 sm:space-y-2">
-                    <span className="text-[8px] sm:text-[9px] font-black text-slate-400 uppercase tracking-widest ml-1">Ordenar</span>
-                    <select className="w-full bg-slate-50 px-3 py-2 sm:px-4 sm:py-3 rounded-lg sm:rounded-[1.2rem] border border-slate-100 text-[9px] sm:text-[10px] font-black uppercase outline-none focus:bg-white transition-all shadow-sm" value={sortHours} onChange={e => setSortHours(e.target.value as any)}>
+                    <span className={`text-[8px] sm:text-[9px] font-black uppercase tracking-widest ml-1 ${isDarkMode ? 'text-gray-500' : 'text-slate-400'}`}>Ordenar</span>
+                    <select className={`w-full px-3 py-2 sm:px-4 sm:py-3 rounded-lg sm:rounded-[1.2rem] border text-[9px] sm:text-[10px] font-black uppercase outline-none transition-all shadow-sm ${isDarkMode ? 'bg-white/5 border-white/10 text-white focus:bg-white/10' : 'bg-slate-50 border-slate-100 text-slate-900 focus:bg-white'}`} value={sortHours} onChange={e => setSortHours(e.target.value as any)}>
                       <option value="none">SIN ORDENAR</option>
                       <option value="desc">MAYOR HORAS</option>
                       <option value="asc">MENOR HORAS</option>
@@ -2845,7 +3472,7 @@ const App = () => {
                         setSortHours('none');
                         setSearchTerm('');
                       }}
-                      className="text-[10px] font-black text-slate-400 hover:text-red-500 uppercase tracking-widest flex items-center gap-1 transition-colors"
+                      className={`text-[10px] font-black hover:text-red-500 uppercase tracking-widest flex items-center gap-1 transition-colors ${isDarkMode ? 'text-gray-500' : 'text-slate-400'}`}
                     >
                       <X size={12} /> Limpiar Filtros
                     </button>
@@ -2854,30 +3481,30 @@ const App = () => {
               </div>
 
               {/* Stats Section */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-2 gap-4 sm:gap-6 mb-6 w-full">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6 mb-6 w-full">
                 {isLoadingStudents ? (
                   Array.from({ length: 4 }).map((_, i) => (
-                    <div key={i} className="bg-white p-4 sm:p-6 rounded-[1.5rem] sm:rounded-[2rem] border border-slate-100 shadow-sm animate-pulse flex flex-col justify-center items-center text-center gap-2">
-                      <div className="h-3 bg-slate-100 rounded-full w-1/2"></div>
-                      <div className="h-10 bg-slate-50 rounded-xl w-3/4"></div>
+                    <div key={i} className={`p-4 sm:p-6 rounded-[1.5rem] sm:rounded-[2rem] border shadow-sm animate-pulse flex flex-col justify-center items-center text-center gap-2 ${isDarkMode ? 'bg-white/5 border-white/10' : 'bg-white border-slate-100'}`}>
+                      <div className={`h-3 rounded-full w-1/2 ${isDarkMode ? 'bg-white/10' : 'bg-slate-100'}`}></div>
+                      <div className={`h-10 rounded-xl w-3/4 ${isDarkMode ? 'bg-white/5' : 'bg-slate-50'}`}></div>
                     </div>
                   ))
                 ) : (
                   <>
-                    <div className="bg-white p-4 sm:p-6 rounded-[1.5rem] sm:rounded-[2rem] border border-slate-200 shadow-sm flex flex-col justify-center items-center text-center">
-                      <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 sm:mb-2">Total Enrolados</span>
+                    <div className={`p-4 sm:p-6 rounded-[1.5rem] sm:rounded-[2rem] border shadow-sm flex flex-col justify-center items-center text-center ${isDarkMode ? 'bg-white/5 border-white/10' : 'bg-white border-slate-200'}`}>
+                      <span className={`text-[10px] font-black uppercase tracking-widest mb-1 sm:mb-2 ${isDarkMode ? 'text-gray-500' : 'text-slate-400'}`}>Total Enrolados</span>
                       <span className="text-3xl sm:text-4xl font-black text-indigo-600">{chartData.totalEnrolled}</span>
                     </div>
-                    <div className="bg-white p-4 sm:p-6 rounded-[1.5rem] sm:rounded-[2rem] border border-slate-200 shadow-sm flex flex-col justify-center items-center text-center">
-                      <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 sm:mb-2">Promedio Hrs/Alumno</span>
+                    <div className={`p-4 sm:p-6 rounded-[1.5rem] sm:rounded-[2rem] border shadow-sm flex flex-col justify-center items-center text-center ${isDarkMode ? 'bg-white/5 border-white/10' : 'bg-white border-slate-200'}`}>
+                      <span className={`text-[10px] font-black uppercase tracking-widest mb-1 sm:mb-2 ${isDarkMode ? 'text-gray-500' : 'text-slate-400'}`}>Promedio Hrs/Alumno</span>
                       <span className="text-3xl sm:text-4xl font-black text-emerald-600">{Number(chartData.avgHoursPerStudent.toFixed(2))}</span>
                     </div>
-                    <div className="bg-white p-4 sm:p-6 rounded-[1.5rem] sm:rounded-[2rem] border border-slate-200 shadow-sm flex flex-col justify-center items-center text-center">
-                      <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 sm:mb-2">Progreso General</span>
+                    <div className={`p-4 sm:p-6 rounded-[1.5rem] sm:rounded-[2rem] border shadow-sm flex flex-col justify-center items-center text-center ${isDarkMode ? 'bg-white/5 border-white/10' : 'bg-white border-slate-200'}`}>
+                      <span className={`text-[10px] font-black uppercase tracking-widest mb-1 sm:mb-2 ${isDarkMode ? 'text-gray-500' : 'text-slate-400'}`}>Progreso General</span>
                       <span className="text-3xl sm:text-4xl font-black text-indigo-600">{Number(chartData.progressPerc.toFixed(2))}%</span>
                     </div>
-                    <div className="bg-white p-4 sm:p-6 rounded-[1.5rem] sm:rounded-[2rem] border border-slate-200 shadow-sm flex flex-col justify-center items-center text-center">
-                      <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 sm:mb-2">Total Proyectos</span>
+                    <div className={`p-4 sm:p-6 rounded-[1.5rem] sm:rounded-[2rem] border shadow-sm flex flex-col justify-center items-center text-center ${isDarkMode ? 'bg-white/5 border-white/10' : 'bg-white border-slate-200'}`}>
+                      <span className={`text-[10px] font-black uppercase tracking-widest mb-1 sm:mb-2 ${isDarkMode ? 'text-gray-500' : 'text-slate-400'}`}>Total Proyectos</span>
                       <span className="text-3xl sm:text-4xl font-black text-amber-500">{projects.length}</span>
                     </div>
                   </>
@@ -2885,29 +3512,29 @@ const App = () => {
               </div>
 
               {/* Charts Section */}
-              <div className="bg-white p-6 sm:p-8 rounded-[2rem] sm:rounded-[2.5rem] border border-slate-200 shadow-sm mb-6 sm:mb-8">
+              <div className={`p-6 sm:p-8 rounded-[2rem] sm:rounded-[2.5rem] border shadow-sm mb-6 sm:mb-8 ${isDarkMode ? 'bg-white/5 border-white/10' : 'bg-white border-slate-200'}`}>
                 {isLoadingStudents ? (
                   <div className="space-y-6 animate-pulse">
                     <div className="flex justify-between items-end">
-                      <div className="h-8 bg-slate-100 rounded-xl w-1/3"></div>
-                      <div className="h-6 bg-slate-50 rounded-lg w-1/4"></div>
+                      <div className={`h-8 rounded-xl w-1/3 ${isDarkMode ? 'bg-white/10' : 'bg-slate-100'}`}></div>
+                      <div className={`h-6 rounded-lg w-1/4 ${isDarkMode ? 'bg-white/5' : 'bg-slate-50'}`}></div>
                     </div>
-                    <div className="h-4 bg-slate-100 rounded-full w-full"></div>
+                    <div className={`h-4 rounded-full w-full ${isDarkMode ? 'bg-white/10' : 'bg-slate-100'}`}></div>
                     <div className="flex justify-between">
-                      <div className="h-3 bg-slate-50 rounded-full w-1/4"></div>
-                      <div className="h-3 bg-slate-50 rounded-full w-1/4"></div>
+                      <div className={`h-3 rounded-full w-1/4 ${isDarkMode ? 'bg-white/5' : 'bg-slate-50'}`}></div>
+                      <div className={`h-3 rounded-full w-1/4 ${isDarkMode ? 'bg-white/5' : 'bg-slate-50'}`}></div>
                     </div>
                   </div>
                 ) : (
                   <>
                     <div className="flex flex-col sm:flex-row justify-between items-start sm:items-end mb-4 gap-2">
-                      <h3 className="text-lg sm:text-xl font-black text-slate-900 tracking-tight">Progreso General de la Generación</h3>
+                      <h3 className={`text-lg sm:text-xl font-black tracking-tight ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>Progreso General de la Generación</h3>
                       <span className="text-xl sm:text-2xl font-black text-indigo-600">{Number(chartData.progressPerc.toFixed(2))}%</span>
                     </div>
-                    <div className="w-full h-3 sm:h-4 bg-slate-100 rounded-full overflow-hidden shadow-inner">
+                    <div className={`w-full h-3 sm:h-4 rounded-full overflow-hidden shadow-inner ${isDarkMode ? 'bg-white/10' : 'bg-slate-100'}`}>
                       <div className="h-full bg-indigo-500 transition-all duration-1000" style={{ width: `${chartData.progressPerc}%` }}></div>
                     </div>
-                    <div className="flex justify-between mt-3 text-[8px] sm:text-[10px] font-black uppercase text-slate-400">
+                    <div className={`flex justify-between mt-3 text-[8px] sm:text-[10px] font-black uppercase ${isDarkMode ? 'text-gray-500' : 'text-slate-400'}`}>
                       <span>{Number(chartData.totalCompletedHours.toFixed(2))} Horas Completadas</span>
                       <span>{chartData.totalRequired} Horas Requeridas</span>
                     </div>
@@ -2915,19 +3542,19 @@ const App = () => {
                 )}
               </div>
 
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 sm:gap-8">
-                <div className="bg-white p-6 sm:p-8 rounded-[2rem] sm:rounded-[2.5rem] border border-slate-200 shadow-sm">
-                  <h3 className="text-lg sm:text-xl font-black text-slate-900 tracking-tight mb-6">Horas por Proyecto</h3>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 sm:gap-8">
+                <div className={`p-6 sm:p-8 rounded-[2rem] sm:rounded-[2.5rem] border shadow-sm ${isDarkMode ? 'bg-white/5 border-white/10' : 'bg-white border-slate-200'}`}>
+                  <h3 className={`text-lg sm:text-xl font-black tracking-tight mb-6 ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>Horas por Proyecto</h3>
                   {isLoadingStudents ? (
-                    <div className="h-48 sm:h-64 w-full bg-slate-50 rounded-2xl animate-pulse"></div>
+                    <div className={`h-48 sm:h-64 w-full rounded-2xl animate-pulse ${isDarkMode ? 'bg-white/5' : 'bg-slate-50'}`}></div>
                   ) : (
                     <div className="h-48 sm:h-64 w-full">
                       <ResponsiveContainer width="100%" height="100%">
                         <BarChart data={chartData.projectChartData}>
-                          <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
-                          <XAxis dataKey="name" tick={{fontSize: 8, fill: '#64748b'}} axisLine={false} tickLine={false} />
-                          <YAxis tick={{fontSize: 8, fill: '#64748b'}} axisLine={false} tickLine={false} />
-                          <Tooltip cursor={{fill: '#f8fafc'}} contentStyle={{borderRadius: '0.75rem', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)', fontSize: '10px'}} />
+                          <CartesianGrid strokeDasharray="3 3" vertical={false} stroke={isDarkMode ? '#333' : '#e2e8f0'} />
+                          <XAxis dataKey="name" tick={{fontSize: 8, fill: isDarkMode ? '#666' : '#64748b'}} axisLine={false} tickLine={false} />
+                          <YAxis tick={{fontSize: 8, fill: isDarkMode ? '#666' : '#64748b'}} axisLine={false} tickLine={false} />
+                          <Tooltip cursor={{fill: isDarkMode ? 'rgba(255,255,255,0.05)' : '#f8fafc'}} contentStyle={{borderRadius: '0.75rem', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)', fontSize: '10px', backgroundColor: isDarkMode ? '#1a1a1a' : '#fff', color: isDarkMode ? '#fff' : '#000'}} />
                           <Bar dataKey="hours" radius={[4, 4, 0, 0]}>
                             {chartData.projectChartData.map((entry, index) => (
                               <Cell key={`cell-${index}`} fill={entry.color} />
@@ -2939,18 +3566,18 @@ const App = () => {
                   )}
                 </div>
 
-                <div className="bg-white p-6 sm:p-8 rounded-[2rem] sm:rounded-[2.5rem] border border-slate-200 shadow-sm">
-                  <h3 className="text-lg sm:text-xl font-black text-slate-900 tracking-tight mb-6">Promedio Horas/Alumno por Proyecto</h3>
+                <div className={`p-6 sm:p-8 rounded-[2rem] sm:rounded-[2.5rem] border shadow-sm ${isDarkMode ? 'bg-white/5 border-white/10' : 'bg-white border-slate-200'}`}>
+                  <h3 className={`text-lg sm:text-xl font-black tracking-tight mb-6 ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>Promedio Horas/Alumno por Proyecto</h3>
                   {isLoadingStudents ? (
-                    <div className="h-48 sm:h-64 w-full bg-slate-50 rounded-2xl animate-pulse"></div>
+                    <div className={`h-48 sm:h-64 w-full rounded-2xl animate-pulse ${isDarkMode ? 'bg-white/5' : 'bg-slate-50'}`}></div>
                   ) : (
                     <div className="h-48 sm:h-64 w-full">
                       <ResponsiveContainer width="100%" height="100%">
                         <BarChart data={chartData.projectChartData}>
-                          <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
-                          <XAxis dataKey="name" tick={{fontSize: 8, fill: '#64748b'}} axisLine={false} tickLine={false} />
-                          <YAxis tick={{fontSize: 8, fill: '#64748b'}} axisLine={false} tickLine={false} />
-                          <Tooltip cursor={{fill: '#f8fafc'}} contentStyle={{borderRadius: '0.75rem', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)', fontSize: '10px'}} />
+                          <CartesianGrid strokeDasharray="3 3" vertical={false} stroke={isDarkMode ? '#333' : '#e2e8f0'} />
+                          <XAxis dataKey="name" tick={{fontSize: 8, fill: isDarkMode ? '#666' : '#64748b'}} axisLine={false} tickLine={false} />
+                          <YAxis tick={{fontSize: 8, fill: isDarkMode ? '#666' : '#64748b'}} axisLine={false} tickLine={false} />
+                          <Tooltip cursor={{fill: isDarkMode ? 'rgba(255,255,255,0.05)' : '#f8fafc'}} contentStyle={{borderRadius: '0.75rem', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)', fontSize: '10px', backgroundColor: isDarkMode ? '#1a1a1a' : '#fff', color: isDarkMode ? '#fff' : '#000'}} />
                           <Bar dataKey="avgHours" radius={[4, 4, 0, 0]}>
                             {chartData.projectChartData.map((entry, index) => (
                               <Cell key={`cell-${index}`} fill={entry.color} />
@@ -2962,18 +3589,18 @@ const App = () => {
                   )}
                 </div>
 
-                <div className="bg-white p-6 sm:p-8 rounded-[2rem] sm:rounded-[2.5rem] border border-slate-200 shadow-sm">
-                  <h3 className="text-lg sm:text-xl font-black text-slate-900 tracking-tight mb-6">Distribución de Alumnos por Proyecto</h3>
+                <div className={`p-6 sm:p-8 rounded-[2rem] sm:rounded-[2.5rem] border shadow-sm ${isDarkMode ? 'bg-white/5 border-white/10' : 'bg-white border-slate-200'}`}>
+                  <h3 className={`text-lg sm:text-xl font-black tracking-tight mb-6 ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>Distribución de Alumnos por Proyecto</h3>
                   {isLoadingStudents ? (
-                    <div className="h-48 sm:h-64 w-full bg-slate-50 rounded-2xl animate-pulse"></div>
+                    <div className={`h-48 sm:h-64 w-full rounded-2xl animate-pulse ${isDarkMode ? 'bg-white/5' : 'bg-slate-50'}`}></div>
                   ) : (
                     <div className="h-48 sm:h-64 w-full">
                       <ResponsiveContainer width="100%" height="100%">
                         <BarChart data={chartData.projectChartData}>
-                          <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
-                          <XAxis dataKey="name" tick={{fontSize: 8, fill: '#64748b'}} axisLine={false} tickLine={false} />
-                          <YAxis tick={{fontSize: 8, fill: '#64748b'}} axisLine={false} tickLine={false} />
-                          <Tooltip cursor={{fill: '#f8fafc'}} contentStyle={{borderRadius: '0.75rem', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)', fontSize: '10px'}} />
+                          <CartesianGrid strokeDasharray="3 3" vertical={false} stroke={isDarkMode ? '#333' : '#e2e8f0'} />
+                          <XAxis dataKey="name" tick={{fontSize: 8, fill: isDarkMode ? '#666' : '#64748b'}} axisLine={false} tickLine={false} />
+                          <YAxis tick={{fontSize: 8, fill: isDarkMode ? '#666' : '#64748b'}} axisLine={false} tickLine={false} />
+                          <Tooltip cursor={{fill: isDarkMode ? 'rgba(255,255,255,0.05)' : '#f8fafc'}} contentStyle={{borderRadius: '0.75rem', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)', fontSize: '10px', backgroundColor: isDarkMode ? '#1a1a1a' : '#fff', color: isDarkMode ? '#fff' : '#000'}} />
                           <Bar dataKey="studentCount" radius={[4, 4, 0, 0]}>
                             {chartData.projectChartData.map((entry, index) => (
                               <Cell key={`cell-${index}`} fill={entry.color} />
@@ -2985,8 +3612,8 @@ const App = () => {
                   )}
                 </div>
 
-                <div className="bg-white p-6 sm:p-8 rounded-[2rem] sm:rounded-[2.5rem] border border-slate-200 shadow-sm">
-                  <h3 className="text-lg sm:text-xl font-black text-slate-900 tracking-tight mb-6">Distribución de Categorías</h3>
+                <div className={`p-6 sm:p-8 rounded-[2rem] sm:rounded-[2.5rem] border shadow-sm ${isDarkMode ? 'bg-white/5 border-white/10' : 'bg-white border-slate-200'}`}>
+                  <h3 className={`text-lg sm:text-xl font-black tracking-tight mb-6 ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>Distribución de Categorías</h3>
                   {isLoadingStudents ? (
                     <div className="h-48 sm:h-64 w-full bg-slate-50 rounded-2xl animate-pulse"></div>
                   ) : (
@@ -3039,34 +3666,34 @@ const App = () => {
                   </div>
                 ) : (
                   paginatedStudents.map(student => {
-                  const totalHrs = (student.records || []).reduce((acc: number, curr: any) => {
+                  const totalHrs = (student?.records || []).reduce((acc: number, curr: any) => {
                     if (curr.validationStatus === 'aprobado' || !curr.validationStatus) return acc + curr.hours;
                     return acc;
                   }, 0);
                   const perc = Math.min(100, (totalHrs / TOTAL_REQUIRED_HOURS) * 100);
-                  const totalSessions = (student.records || []).length;
-                  const countAbsences = (student.records || []).filter((r: any) => r.status !== 'A').length;
+                  const totalSessions = (student?.records || []).length;
+                  const countAbsences = (student?.records || []).filter((r: any) => r.status !== 'A').length;
                   const absencePerc = totalSessions > 0 ? (countAbsences / totalSessions) * 100 : 0;
                   
                     return (
-                      <div key={student.id} onClick={() => { setSelectedStudentId(student.id); setView('student-detail'); }} className="bg-white p-6 md:p-8 rounded-[2.5rem] border border-slate-200 shadow-sm hover:shadow-md hover:border-indigo-300 transition-all cursor-pointer relative overflow-hidden grid grid-cols-1 md:grid-cols-10 lg:grid-cols-[1fr_1.2fr_0.8fr] gap-6">
+                      <div key={student.id} onClick={() => { setSelectedStudentId(student.id); setView('student-detail'); }} className={`p-5 sm:p-8 rounded-[2rem] sm:rounded-[2.5rem] border shadow-sm hover:shadow-md transition-all cursor-pointer relative overflow-hidden grid grid-cols-1 md:grid-cols-10 lg:grid-cols-[1fr_1.2fr_0.8fr] gap-4 sm:gap-6 ${isDarkMode ? 'bg-white/5 border-white/10 hover:border-indigo-500' : 'bg-white border-slate-200 hover:border-indigo-300'}`}>
                         <div className={`absolute left-0 top-0 w-1.5 md:w-2 h-full transition-all duration-500 ${student.workStatus === 'Asignado' ? 'bg-green-500' : 'bg-orange-500'}`}></div>
                         
-                        {/* Col 1: Identidad - md:col-span-6 order-1 */}
+                        {/* Col 1: Identidad */}
                         <div className="md:col-span-6 lg:col-span-1 pl-3 flex flex-col justify-center order-1">
-                          <div className="flex flex-col mb-3">
-                            <div className="flex flex-col md:flex-row md:items-center gap-2 md:gap-3 mb-1">
-                              <h3 className="font-black text-2xl md:text-3xl text-slate-900 tracking-tight leading-tight">{getDisplayName(student)}</h3>
+                          <div className="flex flex-col mb-2 sm:mb-3">
+                            <div className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-3 mb-1">
+                              <h3 className={`font-black text-xl sm:text-3xl tracking-tight leading-tight ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>{getDisplayName(student)}</h3>
                               <div className="flex flex-wrap items-center gap-2">
-                                <span className={`px-3 py-1 rounded-full text-[9px] font-black uppercase border shadow-sm ${(STUDENT_STATUS as any)[student.status]?.color || 'bg-slate-100'}`}>{student.status}</span>
-                                <span className="hidden md:flex lg:hidden items-center gap-1.5 text-indigo-600 bg-indigo-50 px-3 py-1 rounded-xl border border-indigo-100 text-[9px] font-black uppercase tracking-widest"><GraduationCap size={12}/> {student.career}</span>
+                                <span className={`px-2 py-0.5 sm:px-3 sm:py-1 rounded-full text-[8px] sm:text-[9px] font-black uppercase border shadow-sm ${(STUDENT_STATUS as any)[student.status]?.color || 'bg-slate-100'}`}>{student.status}</span>
+                                <span className="hidden sm:flex lg:hidden items-center gap-1.5 text-indigo-600 bg-indigo-50 px-3 py-1 rounded-xl border border-indigo-100 text-[9px] font-black uppercase tracking-widest"><GraduationCap size={12}/> {student.career}</span>
                               </div>
                             </div>
-                            <p className="text-xs md:text-sm text-slate-400 italic font-medium md:-mt-1">{getFullName(student)}</p>
+                            <p className="text-[10px] sm:text-sm text-slate-400 italic font-medium">{getFullName(student)}</p>
                           </div>
                           
-                          <div className="flex lg:flex-wrap items-center gap-3 mt-1 md:mt-2">
-                            <div className="flex items-center gap-2 md:gap-3">
+                          <div className="flex items-center gap-3 mt-1 sm:mt-2">
+                            <div className="flex items-center gap-2">
                               <button 
                                 onClick={(e) => {
                                   e.stopPropagation();
@@ -3076,27 +3703,28 @@ const App = () => {
                                     projectIds: student.projectIds || [],
                                     projectTasks: student.projectTasks || {},
                                     projectTaskHistory: student.projectTaskHistory || {},
-                                    skills: student.skills || []
+                                    skills: student.skills || [],
+                                    skillRatings: student.skillRatings || []
                                   });
                                   setShowEditStudent(true);
                                   setShowAddStudent(true);
                                 }}
-                                className="p-2 md:px-3 md:py-2 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-xl transition-all flex items-center gap-2"
+                                className="p-1.5 sm:px-3 sm:py-2 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-xl transition-all flex items-center gap-2"
                                 title="Editar Estudiante"
                               >
-                                <Edit2 size={16} />
-                                <span className="hidden md:inline lg:hidden text-[10px] font-black uppercase tracking-widest">Editar</span>
+                                <Edit2 size={14} className="sm:w-4 sm:h-4" />
+                                <span className="hidden sm:inline lg:hidden text-[10px] font-black uppercase tracking-widest">Editar</span>
                               </button>
                               <button 
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   handleDeleteStudent(student.id);
                                 }}
-                                className="p-2 md:px-3 md:py-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-xl transition-all flex items-center gap-2"
+                                className="p-1.5 sm:px-3 sm:py-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-xl transition-all flex items-center gap-2"
                                 title="Eliminar Estudiante"
                               >
-                                <Trash2 size={16} />
-                                <span className="hidden md:inline lg:hidden text-[10px] font-black uppercase tracking-widest">Eliminar</span>
+                                <Trash2 size={14} className="sm:w-4 sm:h-4" />
+                                <span className="hidden sm:inline lg:hidden text-[10px] font-black uppercase tracking-widest">Eliminar</span>
                               </button>
                             </div>
                             
@@ -3105,70 +3733,70 @@ const App = () => {
                             </div>
                           </div>
 
-                          <div className="flex gap-5 mt-4 md:mt-5">
+                          <div className="flex gap-4 mt-3 sm:mt-5">
                              {student.email ? (
-                               <a href={`mailto:${student.email}`} className="flex items-center gap-2 text-indigo-500 hover:text-indigo-700 font-bold text-[10px] uppercase transition-colors" onClick={(e) => e.stopPropagation()}>
-                                 <Mail size={14}/> ENVIAR CORREO
+                               <a href={`mailto:${student.email}`} className="flex items-center gap-1.5 text-indigo-500 hover:text-indigo-700 font-bold text-[9px] sm:text-[10px] uppercase transition-colors" onClick={(e) => e.stopPropagation()}>
+                                 <Mail size={12}/> <span className="hidden xs:inline">ENVIAR CORREO</span><span className="xs:hidden">EMAIL</span>
                                </a>
                              ) : (
-                               <div className="flex items-center gap-2 text-slate-400 font-bold text-[10px] uppercase"><Mail size={14}/> SIN REG</div>
+                               <div className="flex items-center gap-1.5 text-slate-400 font-bold text-[9px] sm:text-[10px] uppercase"><Mail size={12}/> <span className="hidden xs:inline">SIN REGISTRO</span><span className="xs:hidden">SIN REG</span></div>
                              )}
-                             <div className="flex items-center gap-2 text-slate-400 font-bold text-[10px] uppercase"><Phone size={14}/> {student.phone ? 'ACTIVO' : 'SIN REG'}</div>
+                             <div className="flex items-center gap-1.5 text-slate-400 font-bold text-[9px] sm:text-[10px] uppercase"><Phone size={12}/> {student.phone ? 'ACTIVO' : 'SIN REG'}</div>
                           </div>
                         </div>
 
-                        {/* Col 3: Métricas - md:col-span-4 order-2 lg:order-3 */}
+                        {/* Col 3: Métricas */}
                         <div className="md:col-span-4 lg:col-span-1 flex flex-col justify-center order-2 lg:order-3">
-                          <div className="w-full bg-slate-50 md:bg-gray-50 rounded-[2rem] md:rounded-xl p-6 md:p-4 flex flex-col justify-center items-center relative overflow-hidden shadow-inner md:shadow-none h-full gap-1">
-                             <p className="text-[9px] font-black text-slate-400 uppercase tracking-[0.2em] mb-1 md:mb-0">Total Reportado</p>
-                             <div className="flex items-baseline gap-1 text-indigo-600 mb-3 md:mb-1">
-                                <span className="text-4xl md:text-3xl lg:text-5xl font-black tracking-tighter">{Number(totalHrs.toFixed(2))}</span>
-                                <span className="text-xs md:text-[10px] lg:text-sm font-black uppercase">H</span>
+                          <div className={`rounded-2xl sm:rounded-xl p-4 sm:p-4 flex flex-col justify-center items-center relative overflow-hidden shadow-inner md:shadow-none h-full gap-1 ${isDarkMode ? 'bg-white/5' : 'bg-slate-50'}`}>
+                             <p className="text-[8px] sm:text-[9px] font-black text-slate-400 uppercase tracking-[0.2em]">Total Reportado</p>
+                             <div className="flex items-baseline gap-1 text-indigo-600 mb-2 sm:mb-1">
+                                <span className="text-3xl sm:text-3xl lg:text-5xl font-black tracking-tighter">{Number(totalHrs.toFixed(2))}</span>
+                                <span className="text-[10px] sm:text-[10px] lg:text-sm font-black uppercase">H</span>
                              </div>
-                             <div className="w-full h-1.5 bg-slate-200 rounded-full overflow-hidden">
+                             <div className={`w-full h-1 rounded-full overflow-hidden ${isDarkMode ? 'bg-white/10' : 'bg-slate-200'}`}>
                                 <div className="h-full bg-indigo-500 transition-all duration-1000" style={{ width: `${perc}%` }}></div>
                              </div>
-                             <p className="mt-2 md:mt-1 text-[10px] md:text-[9px] font-black text-indigo-400 uppercase">{Number(perc.toFixed(2))}%</p>
+                             <p className="mt-1 text-[8px] sm:text-[9px] font-black text-indigo-400 uppercase">{Number(perc.toFixed(2))}%</p>
                           </div>
                         </div>
 
                         {/* Divider for Tablet */}
                         <div className="hidden md:block lg:hidden md:col-span-10 h-px bg-gray-100 mx-5 order-3"></div>
 
-                        {/* Col 2: Proyectos & Tareas - md:col-span-10 order-4 lg:order-2 */}
-                        <div className="md:col-span-10 lg:col-span-1 flex flex-col order-4 lg:order-2 md:p-0 lg:pl-8 lg:border-l border-slate-100">
-                          <div className="flex items-center justify-between mb-4">
-                             <p className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em]">Proyectos & Tareas</p>
-                             <div className={`px-3 py-1 rounded-xl text-[9px] font-black uppercase shadow-sm border ${(WORK_STATUS as any)[student.workStatus]?.color || 'bg-slate-500'}`}>{student.workStatus}</div>
+                        {/* Col 2: Proyectos & Tareas */}
+                        <div className={`md:col-span-10 lg:col-span-1 flex flex-col order-4 lg:order-2 md:p-0 lg:pl-8 lg:border-l ${isDarkMode ? 'border-white/10' : 'border-slate-100'}`}>
+                          <div className="flex items-center justify-between mb-3 sm:mb-4">
+                             <p className="text-[9px] sm:text-[10px] font-black text-slate-400 uppercase tracking-[0.2em]">Proyectos & Tareas</p>
+                             <div className={`px-2 py-0.5 sm:px-3 sm:py-1 rounded-xl text-[8px] sm:text-[9px] font-black uppercase shadow-sm border ${(WORK_STATUS as any)[student.workStatus]?.color || 'bg-slate-500'}`}>{student.workStatus}</div>
                           </div>
-                          <div className="flex flex-col md:flex-row lg:flex-col gap-3 overflow-y-auto md:overflow-x-auto lg:overflow-y-auto max-h-[140px] md:max-h-none lg:max-h-[140px] pr-2 md:pr-0 lg:pr-2 md:pb-1 lg:pb-0 custom-scrollbar md:snap-x md:snap-mandatory flex-1">
-                             {(student.projectIds || []).map((pid: string) => {
+                          <div className="flex flex-col sm:flex-row lg:flex-col gap-2 sm:gap-3 overflow-y-auto sm:overflow-x-auto lg:overflow-y-auto max-h-[120px] sm:max-h-none lg:max-h-[140px] pr-2 sm:pr-0 lg:pr-2 sm:pb-1 lg:pb-0 custom-scrollbar sm:snap-x sm:snap-mandatory flex-1">
+                             {Array.from(new Set(student.projectIds || [])).map((pid: string) => {
                                const p = projects.find(pr => pr.id === pid);
                                const tasks = (student.projectTasks && student.projectTasks[pid]) || [];
                                return (
-                                 <div key={pid} className="bg-slate-50 p-3 rounded-2xl border border-slate-100 shadow-sm md:flex-shrink-0 md:snap-start md:min-w-[180px] lg:min-w-0">
-                                   <div className="flex items-center gap-2 mb-2">
-                                     <div className="w-2.5 h-2.5 rounded-full shadow-sm" style={{ backgroundColor: p?.color || '#cbd5e1' }}></div>
-                                     <span className="font-black text-[10px] text-slate-700 uppercase">{p?.name || 'Proyecto'}</span>
+                                 <div key={pid} className={`p-2.5 sm:p-3 rounded-xl sm:rounded-2xl border shadow-sm sm:flex-shrink-0 sm:snap-start sm:min-w-[160px] lg:min-w-0 ${isDarkMode ? 'bg-white/5 border-white/10' : 'bg-slate-50 border-slate-100'}`}>
+                                   <div className="flex items-center gap-2 mb-1.5 sm:mb-2">
+                                     <div className="w-2 h-2 sm:w-2.5 sm:h-2.5 rounded-full shadow-sm" style={{ backgroundColor: p?.color || '#cbd5e1' }}></div>
+                                     <span className={`font-black text-[9px] sm:text-[10px] uppercase truncate ${isDarkMode ? 'text-gray-300' : 'text-slate-700'}`}>{p?.name || 'Proyecto'}</span>
                                    </div>
-                                   <div className="flex flex-wrap gap-1.5 pl-1">
+                                   <div className="flex flex-wrap gap-1 pl-1">
                                      {tasks.map((t: string, i: number) => (
-                                       <span key={i} className="text-[9px] font-bold text-indigo-700 bg-white px-2 py-0.5 rounded-lg border border-indigo-100 italic shadow-sm tracking-tight">#{String(t)}</span>
+                                       <span key={i} className={`text-[8px] sm:text-[9px] font-bold px-1.5 py-0.5 rounded-lg border italic shadow-sm tracking-tight ${isDarkMode ? 'text-indigo-400 bg-white/10 border-indigo-500/30' : 'text-indigo-700 bg-white border-indigo-100'}`}>#{String(t)}</span>
                                      ))}
                                    </div>
                                  </div>
                                );
                              })}
                              {student.skills && student.skills.length > 0 && (
-                               <div className="bg-emerald-50/30 p-3 rounded-2xl border border-emerald-100/50 shadow-sm mt-2 md:mt-0 lg:mt-2 md:flex-shrink-0 md:snap-start md:min-w-[180px] lg:min-w-0">
-                                 <div className="flex items-center gap-2 mb-2">
-                                   <Briefcase className="text-emerald-600" size={12} />
-                                   <span className="font-black text-[10px] text-emerald-700 uppercase tracking-tight">Habilidades</span>
+                               <div className="bg-emerald-50/30 p-2.5 sm:p-3 rounded-xl sm:rounded-2xl border border-emerald-100/50 shadow-sm sm:flex-shrink-0 sm:snap-start sm:min-w-[160px] lg:min-w-0">
+                                 <div className="flex items-center gap-2 mb-1.5 sm:mb-2">
+                                   <Briefcase className="text-emerald-600" size={10} />
+                                   <span className="font-black text-[9px] sm:text-[10px] text-emerald-700 uppercase tracking-tight">Habilidades</span>
                                  </div>
-                                 <div className="flex flex-wrap gap-1.5 pl-1">
-                                   {student.skills.map((skill: string, i: number) => (
-                                     <span key={i} className="text-[9px] font-bold text-emerald-800 bg-white px-2 py-0.5 rounded-lg border border-emerald-100 shadow-sm">
-                                       {skill}
+                                 <div className="flex flex-wrap gap-1 pl-1">
+                                   {student.skills.map((skill: any, i: number) => (
+                                     <span key={i} className="text-[8px] sm:text-[9px] font-bold text-emerald-800 bg-white px-1.5 py-0.5 rounded-lg border border-emerald-100 shadow-sm">
+                                       {typeof skill === 'string' ? skill : (skill.name || skill.id || 'Skill')}
                                      </span>
                                    ))}
                                  </div>
@@ -3183,12 +3811,12 @@ const App = () => {
                             <div className="w-1 h-1 rounded-full bg-slate-200"></div>
                           </div>
 
-                          <div className="mt-5 pt-5 border-t border-slate-100">
-                            <div className="flex justify-between items-end mb-2">
-                              <p className="text-[9px] font-black text-slate-400 uppercase">Inasistencias</p>
-                              <span className="text-[10px] font-black text-slate-500">{Number(absencePerc.toFixed(2))}%</span>
+                          <div className="mt-4 pt-4 border-t border-slate-100">
+                            <div className="flex justify-between items-end mb-1.5">
+                              <p className="text-[8px] sm:text-[9px] font-black text-slate-400 uppercase">Inasistencias</p>
+                              <span className="text-[9px] sm:text-[10px] font-black text-slate-500">{Number(absencePerc.toFixed(2))}%</span>
                             </div>
-                            <div className="w-full h-1.5 bg-slate-100 rounded-full flex overflow-hidden shadow-inner">
+                            <div className="w-full h-1 bg-slate-100 rounded-full flex overflow-hidden shadow-inner">
                               <div className="bg-red-500 h-full" style={{ width: `${absencePerc}%` }}></div>
                             </div>
                           </div>
@@ -3226,9 +3854,9 @@ const App = () => {
 
           {view === 'student-detail' && selectedStudent && (
             <div className="space-y-6 sm:space-y-12 animate-in fade-in slide-in-from-bottom-8 duration-700 max-w-6xl mx-auto">
-              <button onClick={() => setView('dashboard')} className="flex items-center gap-3 text-slate-400 font-black uppercase text-[9px] sm:text-[11px] tracking-[0.2em] sm:tracking-[0.3em] hover:text-indigo-600 transition-all border border-slate-200 bg-white px-4 py-2 sm:px-6 sm:py-2.5 rounded-xl sm:rounded-2xl shadow-sm"><ArrowLeft size={16} /> Volver</button>
+              <button onClick={() => setView('dashboard')} className={`flex items-center gap-3 font-black uppercase text-[9px] sm:text-[11px] tracking-[0.2em] sm:tracking-[0.3em] transition-all border px-4 py-2 sm:px-6 sm:py-2.5 rounded-xl sm:rounded-2xl shadow-sm ${isDarkMode ? 'text-gray-400 hover:text-indigo-400 border-white/10 bg-white/5' : 'text-slate-400 hover:text-indigo-600 border-slate-200 bg-white'}`}><ArrowLeft size={16} /> Volver</button>
               
-              <div className="bg-white p-4 sm:p-10 lg:p-14 rounded-[1.5rem] sm:rounded-[4.5rem] border border-slate-200 shadow-sm relative overflow-hidden">
+              <div className={`p-4 sm:p-10 lg:p-14 rounded-[1.5rem] sm:rounded-[4.5rem] border shadow-sm relative overflow-hidden ${isDarkMode ? 'bg-[#1a1a1a] border-white/10' : 'bg-white border-slate-200'}`}>
                 <div className="absolute top-0 left-0 w-full h-1.5 sm:h-3 bg-indigo-600"></div>
 
                 <div className="grid grid-cols-1 gap-8 sm:gap-16">
@@ -3239,7 +3867,7 @@ const App = () => {
                             {selectedStudent.status}
                         </div>
                         <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4 mb-6">
-                          <h2 className="text-2xl sm:text-4xl md:text-6xl font-black text-slate-900 leading-tight tracking-tighter">{selectedStudent.name}</h2>
+                          <h2 className={`text-2xl sm:text-4xl md:text-6xl font-black leading-tight tracking-tighter ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>{selectedStudent.name}</h2>
                           <div className="flex gap-2 sm:gap-3 w-full sm:w-auto">
                             <button onClick={startEditStudent} className="flex-1 sm:flex-none flex items-center justify-center gap-2 px-4 py-3 sm:px-6 sm:py-4 bg-slate-900 text-white rounded-xl sm:rounded-2xl font-black text-[9px] sm:text-[10px] uppercase tracking-widest hover:bg-black transition-all shadow-lg active:scale-95">
                               <Edit2 size={16} /> Editar
@@ -3275,25 +3903,25 @@ const App = () => {
                           </div>
                         </div>
                         <div className="flex flex-wrap gap-3 sm:gap-5 uppercase font-black tracking-widest sm:tracking-[0.25em] text-[10px] sm:text-[12px]">
-                            <span className="flex items-center gap-2 sm:gap-3 text-indigo-600 bg-indigo-50 px-4 py-2 sm:px-6 sm:py-3 rounded-2xl sm:rounded-3xl border border-indigo-100 shadow-md"><GraduationCap size={16}/> {selectedStudent.career}</span>
-                            <span className="flex items-center gap-2 sm:gap-3 text-slate-500 bg-slate-50 px-4 py-2 sm:px-6 sm:py-3 rounded-2xl sm:rounded-3xl border border-slate-100 shadow-md">Brigada: {selectedStudent.brigadePeriod}</span>
+                            <span className={`flex items-center gap-2 sm:gap-3 px-4 py-2 sm:px-6 sm:py-3 rounded-2xl sm:rounded-3xl border shadow-md ${isDarkMode ? 'text-indigo-400 bg-indigo-500/10 border-indigo-500/20' : 'text-indigo-600 bg-indigo-50 border-indigo-100'}`}><GraduationCap size={16}/> {selectedStudent.career}</span>
+                            <span className={`flex items-center gap-2 sm:gap-3 px-4 py-2 sm:px-6 sm:py-3 rounded-2xl sm:rounded-3xl border shadow-md ${isDarkMode ? 'text-gray-400 bg-white/5 border-white/10' : 'text-slate-500 bg-slate-50 border-slate-100'}`}>Brigada: {selectedStudent.brigadePeriod}</span>
                         </div>
                     </div>
                     <div className="grid grid-cols-1 gap-4 sm:gap-6">
-                        <div className="flex flex-col gap-1 sm:gap-2 p-4 sm:p-6 bg-slate-50 rounded-2xl sm:rounded-[2.5rem] border border-slate-100">
+                        <div className={`flex flex-col gap-1 sm:gap-2 p-4 sm:p-6 rounded-2xl sm:rounded-[2.5rem] border ${isDarkMode ? 'bg-white/5 border-white/10' : 'bg-slate-50 border-slate-100'}`}>
                             <span className="text-[9px] sm:text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-2"><Mail size={12} className="text-indigo-300"/> Email</span>
                             {selectedStudent.email ? (
-                              <a href={`mailto:${selectedStudent.email}`} className="truncate text-xs sm:text-[13px] font-black text-indigo-600 hover:text-indigo-800 transition-colors">
+                              <a href={`mailto:${selectedStudent.email}`} className={`truncate text-xs sm:text-[13px] font-black transition-colors ${isDarkMode ? 'text-indigo-400 hover:text-indigo-300' : 'text-indigo-600 hover:text-indigo-800'}`}>
                                 {selectedStudent.email}
                               </a>
                             ) : (
                               <span className="text-xs sm:text-[13px] font-black text-slate-300 italic">No registrado</span>
                             )}
                         </div>
-                        <div className="flex flex-col gap-1 sm:gap-2 p-4 sm:p-6 bg-slate-50 rounded-2xl sm:rounded-[2.5rem] border border-slate-100">
+                        <div className={`flex flex-col gap-1 sm:gap-2 p-4 sm:p-6 rounded-2xl sm:rounded-[2.5rem] border ${isDarkMode ? 'bg-white/5 border-white/10' : 'bg-slate-50 border-slate-100'}`}>
                             <span className="text-[9px] sm:text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-2"><Phone size={12} className="text-emerald-300"/> Teléfono</span>
                             {selectedStudent.phone ? (
-                              <a href={`tel:${selectedStudent.phone}`} className="text-xs sm:text-[13px] font-black text-slate-600 hover:text-emerald-600 transition-colors">
+                              <a href={`tel:${selectedStudent.phone}`} className={`text-xs sm:text-[13px] font-black transition-colors ${isDarkMode ? 'text-gray-300 hover:text-emerald-400' : 'text-slate-600 hover:text-emerald-600'}`}>
                                 {selectedStudent.phone}
                               </a>
                             ) : (
@@ -3310,18 +3938,18 @@ const App = () => {
                                 <div className="w-8 h-1 bg-indigo-100"></div> Proyectos Asignados
                             </div>
                             <div className="space-y-3 sm:space-y-4 max-h-[250px] overflow-y-auto pr-2 custom-scrollbar">
-                                {(selectedStudent.projectIds || []).map((pid: string) => {
+                                {Array.from(new Set(selectedStudent.projectIds || [])).map((pid: string) => {
                                     const p = projects.find(pr => pr.id === pid);
                                     const tasks = (selectedStudent.projectTasks && selectedStudent.projectTasks[pid]) || [];
                                     return (
-                                        <div key={pid} className="bg-slate-50 p-4 sm:p-6 rounded-2xl sm:rounded-[2rem] border border-slate-100 shadow-sm hover:shadow-md transition-all">
+                                        <div key={pid} className={`p-4 sm:p-6 rounded-2xl sm:rounded-[2rem] border shadow-sm hover:shadow-md transition-all ${isDarkMode ? 'bg-white/5 border-white/10' : 'bg-slate-50 border-slate-100'}`}>
                                             <div className="flex items-center gap-3 mb-3">
                                                 <div className="w-3 h-3 rounded-full shadow-sm" style={{ backgroundColor: p?.color || '#cbd5e1' }}></div>
-                                                <span className="font-black text-[11px] sm:text-[12px] text-slate-800 uppercase tracking-tight">{p?.name || 'Proyecto'}</span>
+                                                <span className={`font-black text-[11px] sm:text-[12px] uppercase tracking-tight ${isDarkMode ? 'text-white' : 'text-slate-800'}`}>{p?.name || 'Proyecto'}</span>
                                             </div>
                                             <div className="flex flex-wrap gap-2">
                                                 {tasks.map((t: string, i: number) => (
-                                                    <span key={i} className="text-[9px] sm:text-[10px] font-bold text-indigo-700 bg-white px-3 py-1 rounded-lg border border-indigo-100 italic shadow-sm">#{String(t)}</span>
+                                                    <span key={i} className={`text-[9px] sm:text-[10px] font-bold px-3 py-1 rounded-lg border italic shadow-sm ${isDarkMode ? 'text-indigo-400 bg-white/10 border-indigo-500/30' : 'text-indigo-700 bg-white border-indigo-100'}`}>#{String(t)}</span>
                                                 ))}
                                                 {tasks.length === 0 && <span className="text-[10px] font-bold text-slate-300 italic">Sin tareas específicas</span>}
                                             </div>
@@ -3412,21 +4040,21 @@ const App = () => {
 
               {/* Bitácora Histórica */}
               <div className="bg-white rounded-[5rem] border border-slate-200 shadow-sm overflow-hidden">
-                <div className="p-12 border-b border-slate-100 font-black bg-slate-50 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-6 text-xs text-slate-500 uppercase tracking-[0.3em] shadow-sm">
+                <div className="p-12 border-b border-slate-100 font-black bg-slate-50 flex flex-col gap-6 text-xs text-slate-500 uppercase tracking-[0.3em] shadow-sm">
                    <span className="flex items-center gap-4"><History size={28} className="text-indigo-500" /> Cronología de Sesiones</span>
-                   <div className="flex items-center gap-4">
+                   <div className="flex items-center gap-4 overflow-x-auto hide-scrollbar snap-x snap-mandatory w-full pb-2">
                      {selectedRecords.length > 0 && (
                        <button 
                          onClick={() => handleDeleteSelected(selectedStudent.id)} 
-                         className="flex items-center gap-3 bg-rose-50 hover:bg-rose-600 text-rose-600 hover:text-white border border-rose-100 px-6 py-3 rounded-[1.5rem] font-black transition-all shadow-sm"
+                         className="flex items-center gap-3 bg-rose-50 hover:bg-rose-600 text-rose-600 hover:text-white border border-rose-100 px-6 py-3 rounded-[1.5rem] font-black transition-all shadow-sm shrink-0 snap-center"
                        >
                          <Trash2 size={16} /> Borrar Seleccionados
                        </button>
                      )}
-                     <button onClick={handleDownloadReport} className="flex items-center gap-3 bg-white hover:bg-indigo-50 text-indigo-600 border border-indigo-100 px-6 py-3 rounded-[1.5rem] font-black transition-all shadow-sm"><Download size={16} /> Descargar Reporte</button>
+                     <button onClick={handleDownloadReport} className="flex items-center gap-3 bg-white hover:bg-indigo-50 text-indigo-600 border border-indigo-100 px-6 py-3 rounded-[1.5rem] font-black transition-all shadow-sm shrink-0 snap-center"><Download size={16} /> Descargar Reporte</button>
                      <button 
                        onClick={() => setSessionSortOrder(prev => prev === 'desc' ? 'asc' : 'desc')}
-                       className="p-3 rounded-[1.5rem] border font-black transition-all shadow-sm flex items-center justify-center bg-white text-slate-400 border-slate-200 hover:bg-slate-50"
+                       className="p-3 rounded-[1.5rem] border font-black transition-all shadow-sm flex items-center justify-center bg-white text-slate-400 border-slate-200 hover:bg-slate-50 shrink-0 snap-center"
                        title={`Ordenar: ${sessionSortOrder === 'desc' ? 'Más recientes primero' : 'Más antiguos primero'}`}
                      >
                        <ArrowDownUp size={20} className={sessionSortOrder === 'asc' ? 'rotate-180 transition-transform' : 'transition-transform'} />
@@ -3437,12 +4065,12 @@ const App = () => {
                          if (selectedRecords.length === records.length) setSelectedRecords([]);
                          else setSelectedRecords(records.map((r: any) => r.id));
                        }}
-                       className={`p-3 rounded-[1.5rem] border font-black transition-all shadow-sm flex items-center justify-center ${selectedRecords.length > 0 && selectedRecords.length === (selectedStudent.records || []).length ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-slate-400 border-slate-200 hover:bg-slate-50'}`}
+                       className={`p-3 rounded-[1.5rem] border font-black transition-all shadow-sm flex items-center justify-center shrink-0 snap-center ${selectedRecords.length > 0 && selectedRecords.length === (selectedStudent.records || []).length ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-slate-400 border-slate-200 hover:bg-slate-50'}`}
                        title={selectedRecords.length > 0 && selectedRecords.length === (selectedStudent.records || []).length ? 'Deseleccionar Todo' : 'Seleccionar Todo'}
                      >
                        {selectedRecords.length > 0 && selectedRecords.length === (selectedStudent.records || []).length ? <X size={20} /> : <CheckSquare size={20} />}
                      </button>
-                     <div className="bg-white px-8 py-3 rounded-[1.5rem] border border-slate-200 font-black text-slate-400"> {(selectedStudent.records || []).length} SESIONES TOTALES </div>
+                     <div className="bg-white px-8 py-3 rounded-[1.5rem] border border-slate-200 font-black text-slate-400 shrink-0 snap-center"> {(selectedStudent.records || []).length} SESIONES TOTALES </div>
                    </div>
                 </div>
                 <div className="divide-y divide-slate-100">
@@ -3872,26 +4500,89 @@ const App = () => {
              </div>
           )}
 
+          {view === 'skill-map' && (
+            <SkillMap 
+              users={students.map(s => ({
+                uid: s.id,
+                firstName: s.firstName || '',
+                lastNamePaterno: s.lastNamePaterno || '',
+                lastNameMaterno: s.lastNameMaterno || '',
+                position: s.position || s.career || 'Prestador',
+                color: s.color || '#6366f1',
+                skills: s.skills || [],
+                skillRatings: s.skillRatings || [],
+                career: s.career || ''
+              }))}
+              onUpdateUser={async (userId, data) => {
+                const student = students.find(s => s.id === userId);
+                if (!student) return;
+                
+                const updatedStudent = { ...student, ...data };
+                setStudents(prev => prev.map(s => s.id === userId ? updatedStudent : s));
+                
+                try {
+                  await setDoc(doc(db, 'users', userId), updatedStudent, { merge: true });
+                  showSuccessToast("Habilidades actualizadas");
+                } catch (error) {
+                  handleFirestoreError(error, OperationType.WRITE, `users/${userId}`);
+                }
+              }}
+              onAddUser={async (data) => {
+                const newId = `p-${Date.now()}`;
+                const newStudent = {
+                  id: newId,
+                  uid: newId,
+                  firstName: data.firstName || '',
+                  lastNamePaterno: data.lastNamePaterno || '',
+                  lastNameMaterno: data.lastNameMaterno || '',
+                  name: `${data.firstName || ''} ${data.lastNamePaterno || ''}`.trim(),
+                  email: `${newId}@example.com`,
+                  role: 'user',
+                  status: 'En Curso',
+                  workStatus: 'Sin asignar',
+                  projectIds: [],
+                  skills: data.skills || [],
+                  color: data.color || '#6366f1',
+                  position: data.position || '',
+                  career: data.career || 'Arquitectura',
+                  createdAt: new Date().toISOString()
+                };
+                
+                setStudents(prev => [...prev, newStudent]);
+                
+                try {
+                  await setDoc(doc(db, 'users', newId), newStudent);
+                  showSuccessToast("Prestador agregado");
+                } catch (error) {
+                  handleFirestoreError(error, OperationType.WRITE, `users/${newId}`);
+                }
+              }}
+              isAdmin={userRole !== 'user'}
+              currentUserId={currentUserId || ''}
+              isDarkMode={isDarkMode}
+            />
+          )}
+
           {view === 'categories' && (
-            <div className="max-w-6xl mx-auto space-y-16 animate-in slide-in-from-right-8 duration-700 pb-20">
+            <div className={`max-w-6xl mx-auto space-y-16 animate-in slide-in-from-right-8 duration-700 pb-20 ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>
               <div className="space-y-8">
                 <div className="flex items-center gap-5">
-                   <div className="p-4 bg-indigo-100 text-indigo-600 rounded-2xl shadow-sm border border-indigo-200"><Tag size={32}/></div>
-                   <h2 className="text-4xl font-black text-slate-900 tracking-tight">Categorías de Actividad</h2>
+                   <div className={`p-4 rounded-2xl shadow-sm border ${isDarkMode ? 'bg-white/5 text-indigo-400 border-white/10' : 'bg-indigo-100 text-indigo-600 border-indigo-200'}`}><Tag size={32}/></div>
+                   <h2 className={`text-4xl font-black tracking-tight ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>Categorías de Actividad</h2>
                 </div>
                 <div className="grid grid-cols-1 gap-8">
-                  <div className="bg-white p-8 rounded-3xl border border-slate-200 shadow-sm h-fit">
-                    <h3 className="font-black text-[11px] uppercase tracking-[0.2em] text-slate-400 mb-6 flex items-center gap-2"><PlusCircle size={16}/> Nueva Categoría</h3>
+                  <div className={`p-8 rounded-3xl border shadow-sm h-fit ${isDarkMode ? 'bg-white/5 border-white/10' : 'bg-white border-slate-200'}`}>
+                    <h3 className={`font-black text-[11px] uppercase tracking-[0.2em] mb-6 flex items-center gap-2 ${isDarkMode ? 'text-gray-500' : 'text-slate-400'}`}><PlusCircle size={16}/> Nueva Categoría</h3>
                     <div className="space-y-6">
                       <div className="space-y-2">
-                         <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest ml-1">Nombre</label>
-                         <input type="text" placeholder="Ej. Taller de Paisaje" className="w-full p-4 border border-slate-200 rounded-2xl bg-slate-50 font-bold outline-none focus:bg-white focus:border-indigo-300 transition-all text-sm shadow-inner" value={newInlineCat.name} onChange={e => setNewInlineCat({...newInlineCat, name: e.target.value})} />
+                         <label className={`text-[10px] font-black uppercase tracking-widest ml-1 ${isDarkMode ? 'text-gray-400' : 'text-slate-500'}`}>Nombre</label>
+                         <input type="text" placeholder="Ej. Taller de Paisaje" className={`w-full p-4 border rounded-2xl font-bold outline-none transition-all text-sm shadow-inner ${isDarkMode ? 'border-white/10 bg-white/5 text-white focus:bg-white/10 focus:border-indigo-500' : 'border-slate-200 bg-slate-50 text-slate-900 focus:bg-white focus:border-indigo-300'}`} value={newInlineCat.name} onChange={e => setNewInlineCat({...newInlineCat, name: e.target.value})} />
                       </div>
                       <div className="space-y-2">
-                         <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest ml-1">Color</label>
-                         <div className="flex items-center gap-4 bg-slate-50 p-3 rounded-2xl border border-slate-100 shadow-inner">
+                         <label className={`text-[10px] font-black uppercase tracking-widest ml-1 ${isDarkMode ? 'text-gray-400' : 'text-slate-500'}`}>Color</label>
+                         <div className={`flex items-center gap-4 p-3 rounded-2xl border shadow-inner ${isDarkMode ? 'bg-white/5 border-white/10' : 'bg-slate-50 border-slate-100'}`}>
                             <input type="color" className="w-12 h-12 p-0 border-0 rounded-xl cursor-pointer bg-transparent shadow-sm" value={newInlineCat.color} onChange={e => setNewInlineCat({...newInlineCat, color: e.target.value})} />
-                            <span className="text-sm font-bold text-slate-600 uppercase font-mono">{newInlineCat.color}</span>
+                            <span className={`text-sm font-bold uppercase font-mono ${isDarkMode ? 'text-gray-300' : 'text-slate-600'}`}>{newInlineCat.color}</span>
                          </div>
                       </div>
                       <button onClick={handleCreateInlineCat} className="w-full bg-indigo-600 text-white py-4 rounded-2xl font-black uppercase text-xs hover:bg-indigo-700 transition-all shadow-lg active:scale-95">Registrar Categoría</button>
@@ -3899,11 +4590,11 @@ const App = () => {
                   </div>
                   <div className="grid grid-cols-1 gap-4 h-fit content-start">
                     {categories.map(cat => (
-                      <div key={cat.id} className="bg-white p-5 rounded-2xl border border-slate-200 flex items-center justify-between group hover:border-indigo-300 transition-all shadow-sm">
+                      <div key={cat.id} className={`p-5 rounded-2xl border flex items-center justify-between group transition-all shadow-sm ${isDarkMode ? 'bg-white/5 border-white/10 hover:border-indigo-500' : 'bg-white border-slate-200 hover:border-indigo-300'}`}>
                         {editingCategory?.id === cat.id ? (
                           <div className="flex items-center gap-3 w-full">
                             <input type="color" className="w-8 h-8 p-0 border-0 rounded-lg cursor-pointer bg-transparent shadow-sm shrink-0" value={editingCategory.color} onChange={e => setEditingCategory({...editingCategory, color: e.target.value})} />
-                            <input type="text" className="flex-1 p-2 border border-slate-200 rounded-xl bg-slate-50 font-bold outline-none focus:bg-white text-sm" value={editingCategory.name} onChange={e => setEditingCategory({...editingCategory, name: e.target.value})} />
+                            <input type="text" className={`flex-1 p-2 border rounded-xl font-bold outline-none text-sm ${isDarkMode ? 'border-white/10 bg-white/10 text-white focus:bg-white/20' : 'border-slate-200 bg-slate-50 text-slate-900 focus:bg-white'}`} value={editingCategory.name} onChange={e => setEditingCategory({...editingCategory, name: e.target.value})} />
                             <button onClick={async () => {
                               setCategories(categories.map(c => c.id === cat.id ? editingCategory : c));
                               try {
@@ -3913,17 +4604,17 @@ const App = () => {
                               } catch (error) {
                                 handleFirestoreError(error, OperationType.WRITE, `categories/${cat.id}`);
                               }
-                            }} className="text-emerald-600 hover:bg-emerald-50 p-2 rounded-xl transition-all"><Check size={18} /></button>
-                            <button onClick={() => setEditingCategory(null)} className="text-slate-400 hover:bg-slate-50 p-2 rounded-xl transition-all"><X size={18} /></button>
+                            }} className="text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-500/10 p-2 rounded-xl transition-all"><Check size={18} /></button>
+                            <button onClick={() => setEditingCategory(null)} className="text-slate-400 hover:bg-slate-50 dark:hover:bg-white/5 p-2 rounded-xl transition-all"><X size={18} /></button>
                           </div>
                         ) : (
                           <>
                             <div className="flex items-center gap-4 min-w-0">
-                               <div className="w-5 h-5 rounded-full shadow-inner border border-slate-100 shrink-0" style={{ backgroundColor: cat.color }}></div>
-                               <span className="font-bold text-slate-800 text-sm tracking-tight truncate">{cat.name}</span>
+                               <div className={`w-5 h-5 rounded-full shadow-inner border shrink-0 ${isDarkMode ? 'border-white/10' : 'border-slate-100'}`} style={{ backgroundColor: cat.color }}></div>
+                               <span className={`font-bold text-sm tracking-tight truncate ${isDarkMode ? 'text-white' : 'text-slate-800'}`}>{cat.name}</span>
                             </div>
                             <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                              <button onClick={() => setEditingCategory(cat)} className="text-slate-300 hover:text-indigo-500 p-2.5 bg-slate-50 rounded-xl transition-all shadow-sm"><Edit2 size={16} /></button>
+                              <button onClick={() => setEditingCategory(cat)} className={`p-2.5 rounded-xl transition-all shadow-sm ${isDarkMode ? 'text-gray-400 hover:text-indigo-400 bg-white/5 hover:bg-white/10' : 'text-slate-300 hover:text-indigo-500 bg-slate-50'}`}><Edit2 size={16} /></button>
                               <button onClick={() => {
                                 showConfirmToast('¿Estás seguro de que deseas eliminar esta categoría? Esto no se puede deshacer.', async () => {
                                   setCategories(categories.filter(c => c.id !== cat.id));
@@ -3934,7 +4625,7 @@ const App = () => {
                                     handleFirestoreError(error, OperationType.DELETE, `categories/${cat.id}`);
                                   }
                                 });
-                              }} className="text-slate-300 hover:text-red-500 p-2.5 bg-slate-50 rounded-xl transition-all shadow-sm"><Trash2 size={18} /></button>
+                              }} className={`p-2.5 rounded-xl transition-all shadow-sm ${isDarkMode ? 'text-gray-400 hover:text-red-400 bg-white/5 hover:bg-white/10' : 'text-slate-300 hover:text-red-500 bg-slate-50'}`}><Trash2 size={18} /></button>
                             </div>
                           </>
                         )}
@@ -3944,22 +4635,22 @@ const App = () => {
                 </div>
               </div>
 
-              <div className="space-y-8 pt-12 border-t-2 border-dashed border-slate-200">
+              <div className={`space-y-8 pt-12 border-t-2 border-dashed ${isDarkMode ? 'border-white/10' : 'border-slate-200'}`}>
                 <div className="flex items-center gap-5">
-                   <div className="p-4 bg-emerald-100 text-emerald-600 rounded-2xl shadow-sm border border-emerald-200"><Briefcase size={32}/></div>
-                   <h2 className="text-4xl font-black text-slate-900 tracking-tight">Proyectos de Brigada</h2>
+                   <div className={`p-4 rounded-2xl shadow-sm border ${isDarkMode ? 'bg-white/5 text-emerald-400 border-white/10' : 'bg-emerald-100 text-emerald-600 border-emerald-200'}`}><Briefcase size={32}/></div>
+                   <h2 className={`text-4xl font-black tracking-tight ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>Proyectos de Brigada</h2>
                 </div>
                 <div className="grid grid-cols-1 gap-8">
-                  <div className="bg-white p-8 rounded-3xl border border-slate-200 shadow-sm h-fit">
-                    <h3 className="font-black text-[11px] uppercase tracking-[0.2em] text-slate-400 mb-6 flex items-center gap-2"><PlusCircle size={16}/> Nuevo Proyecto</h3>
+                  <div className={`p-8 rounded-3xl border shadow-sm h-fit ${isDarkMode ? 'bg-white/5 border-white/10' : 'bg-white border-slate-200'}`}>
+                    <h3 className={`font-black text-[11px] uppercase tracking-[0.2em] mb-6 flex items-center gap-2 ${isDarkMode ? 'text-gray-500' : 'text-slate-400'}`}><PlusCircle size={16}/> Nuevo Proyecto</h3>
                     <div className="space-y-6">
                       <div className="space-y-2">
-                        <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest ml-1">Título</label>
-                        <input type="text" placeholder="Ej. Intervención Plaza..." className="w-full p-4 border border-slate-200 rounded-2xl bg-slate-50 font-bold outline-none focus:bg-white focus:border-emerald-300 transition-all text-sm shadow-inner" id="newProjName" />
+                        <label className={`text-[10px] font-black uppercase tracking-widest ml-1 ${isDarkMode ? 'text-gray-400' : 'text-slate-500'}`}>Título</label>
+                        <input type="text" placeholder="Ej. Intervención Plaza..." className={`w-full p-4 border rounded-2xl font-bold outline-none transition-all text-sm shadow-inner ${isDarkMode ? 'border-white/10 bg-white/5 text-white focus:bg-white/10 focus:border-emerald-500' : 'border-slate-200 bg-slate-50 text-slate-900 focus:bg-white focus:border-emerald-300'}`} id="newProjName" />
                       </div>
                       <div className="space-y-2">
                         <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest ml-1">Color</label>
-                        <div className="flex flex-wrap gap-3 p-4 bg-slate-50 rounded-2xl border border-slate-100 shadow-inner">
+                        <div className={`flex flex-wrap gap-3 p-4 rounded-2xl border shadow-inner ${isDarkMode ? 'bg-white/5 border-white/10' : 'bg-slate-50 border-slate-100'}`}>
                           {['#22c55e','#eab308','#ef4444','#3b82f6','#6366f1','#a855f7','#f97316','#ec4899'].map(c=>(
                             <button key={c} onClick={(e: any)=>{
                                (window as any).__selProjColor=c;
@@ -3987,14 +4678,14 @@ const App = () => {
                   </div>
                   <div className="grid grid-cols-1 gap-4 h-fit content-start">
                     {projects.map(p => (
-                      <div key={p.id} className="bg-white p-5 rounded-2xl border border-slate-200 flex items-center justify-between group hover:border-emerald-300 transition-all shadow-sm">
+                      <div key={p.id} className={`p-5 rounded-2xl border flex items-center justify-between group transition-all shadow-sm ${isDarkMode ? 'bg-white/5 border-white/10 hover:border-emerald-500/50' : 'bg-white border-slate-200 hover:border-emerald-300'}`}>
                         {editingProject?.id === p.id ? (
                           <div className="flex flex-col gap-3 w-full">
-                            <input type="text" className="w-full p-2 border border-slate-200 rounded-xl bg-slate-50 font-bold outline-none focus:bg-white text-sm" value={editingProject.name} onChange={e => setEditingProject({...editingProject, name: e.target.value})} />
+                            <input type="text" className={`w-full p-2 border rounded-xl font-bold outline-none text-sm ${isDarkMode ? 'bg-white/5 border-white/10 text-white focus:bg-white/10' : 'bg-slate-50 border-slate-200 text-slate-900 focus:bg-white'}`} value={editingProject.name} onChange={e => setEditingProject({...editingProject, name: e.target.value})} />
                             <div className="flex items-center justify-between">
                               <div className="flex flex-wrap gap-1">
                                 {['#22c55e','#eab308','#ef4444','#3b82f6','#6366f1','#a855f7','#f97316','#ec4899'].map(c=>(
-                                  <button key={c} onClick={() => setEditingProject({...editingProject, color: c})} className={`w-5 h-5 rounded-full border-2 ${editingProject.color === c ? 'border-slate-800 scale-110' : 'border-white'} shadow-sm transition-all`} style={{ backgroundColor: c }}></button>
+                                  <button key={c} onClick={() => setEditingProject({...editingProject, color: c})} className={`w-5 h-5 rounded-full border-2 ${editingProject.color === c ? (isDarkMode ? 'border-white scale-110' : 'border-slate-800 scale-110') : 'border-white'} shadow-sm transition-all`} style={{ backgroundColor: c }}></button>
                                 ))}
                               </div>
                               <div className="flex gap-1">
@@ -4007,50 +4698,26 @@ const App = () => {
                                   } catch (error) {
                                     handleFirestoreError(error, OperationType.WRITE, `projects/${p.id}`);
                                   }
-                                }} className="text-emerald-600 hover:bg-emerald-50 p-2 rounded-xl transition-all"><Check size={18} /></button>
-                                <button onClick={() => setEditingProject(null)} className="text-slate-400 hover:bg-slate-50 p-2 rounded-xl transition-all"><X size={18} /></button>
+                                }} className={`p-2 rounded-xl transition-all ${isDarkMode ? 'text-emerald-400 hover:bg-white/10' : 'text-emerald-600 hover:bg-emerald-50'}`}><Check size={18} /></button>
+                                <button onClick={() => setEditingProject(null)} className={`p-2 rounded-xl transition-all ${isDarkMode ? 'text-gray-400 hover:bg-white/10' : 'text-slate-400 hover:bg-slate-50'}`}><X size={18} /></button>
                               </div>
                             </div>
                           </div>
                         ) : (
                           <>
                             <div className="flex items-center gap-4 min-w-0">
-                               <div className="w-5 h-5 rounded-full shadow-inner border border-slate-100 shrink-0" style={{ backgroundColor: p.color }}></div>
-                               <span className="font-bold text-slate-800 text-sm tracking-tight truncate">{p.name}</span>
+                               <div className={`w-5 h-5 rounded-full shadow-inner border shrink-0 ${isDarkMode ? 'border-white/10' : 'border-slate-100'}`} style={{ backgroundColor: p.color }}></div>
+                               <span className={`font-bold text-sm tracking-tight truncate ${isDarkMode ? 'text-white' : 'text-slate-800'}`}>{p.name}</span>
                             </div>
                             <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                              <button onClick={() => setEditingProject(p)} className="text-slate-300 hover:text-emerald-500 p-2.5 bg-slate-50 rounded-xl transition-all shadow-sm"><Edit2 size={16} /></button>
-                              <button onClick={() => { showConfirmToast('¿Estás seguro de que deseas eliminar este proyecto?', async () => { 
-                                const updatedProjects = projects.filter(proj => proj.id !== p.id);
-                                setProjects(updatedProjects);
-                                
-                                const updatedStudents = students.map(s => { 
-                                  if ((s.projectIds || []).includes(p.id)) { 
-                                    const newIds = (s.projectIds || []).filter((id: string) => id !== p.id); 
-                                    return { ...s, projectIds: newIds, workStatus: newIds.length > 0 ? 'Asignado' : 'Sin asignar' }; 
-                                  } 
-                                  return s; 
-                                });
-                                setStudents(updatedStudents);
-
-                                try {
-                                  await deleteDoc(doc(db, 'projects', p.id));
-                                  // Also update all students who had this project
-                                  const updates = updatedStudents.filter(s => (s.projectIds || []).includes(p.id)).map(async (s) => {
-                                    const dataToSave = {
-                                      ...s,
-                                      uid: s.id,
-                                      role: s.role || 'user',
-                                      createdAt: s.createdAt || new Date().toISOString()
-                                    };
-                                    await setDoc(doc(db, 'users', s.id), dataToSave, { merge: true });
-                                  });
-                                  await Promise.all(updates);
-                                  showSuccessToast("Proyecto eliminado"); 
-                                } catch (error) {
-                                  handleFirestoreError(error, OperationType.DELETE, `projects/${p.id}`);
-                                }
-                              }); }} className="text-slate-300 hover:text-red-600 p-2.5 bg-slate-50 rounded-xl transition-all shadow-sm"><Trash2 size={18} /></button>
+                              <button onClick={() => setEditingProject(p)} className={`p-2.5 rounded-xl transition-all shadow-sm ${isDarkMode ? 'text-gray-400 hover:text-emerald-400 bg-white/10' : 'text-slate-300 hover:text-emerald-500 bg-slate-50'}`}><Edit2 size={16} /></button>
+                              <button onClick={() => { 
+                                showConfirm(
+                                  '¿Eliminar Proyecto?', 
+                                  '¿Estás seguro de que deseas eliminar este proyecto? Esta acción es permanente y borrará todas las tareas y recursos asociados.', 
+                                  () => handleDeleteProject(p.id)
+                                );
+                              }} className={`p-2.5 rounded-xl transition-all shadow-sm ${isDarkMode ? 'text-gray-400 hover:text-red-400 bg-white/10' : 'text-slate-300 hover:text-red-600 bg-slate-50'}`}><Trash2 size={18} /></button>
                             </div>
                           </>
                         )}
@@ -4060,13 +4727,13 @@ const App = () => {
                 </div>
               </div>
 
-              <div className="space-y-8 pt-12 border-t-2 border-dashed border-slate-200">
+              <div className={`space-y-8 pt-12 border-t-2 border-dashed ${isDarkMode ? 'border-white/10' : 'border-slate-200'}`}>
                 <div className="flex items-center gap-5">
-                   <div className="p-4 bg-slate-100 text-slate-600 rounded-2xl shadow-sm border border-slate-200"><Download size={32}/></div>
-                   <h2 className="text-4xl font-black text-slate-900 tracking-tight">Respaldo de Datos</h2>
+                   <div className={`p-4 rounded-2xl shadow-sm border ${isDarkMode ? 'bg-white/10 text-gray-300 border-white/10' : 'bg-slate-100 text-slate-600 border-slate-200'}`}><Download size={32}/></div>
+                   <h2 className={`text-4xl font-black tracking-tight ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>Respaldo de Datos</h2>
                 </div>
-                <div className="bg-white p-8 rounded-3xl border border-slate-200 shadow-sm">
-                  <p className="text-slate-500 mb-6 font-medium">Puedes exportar todos los datos del sistema (alumnos, registros, proyectos y categorías) a un archivo JSON para tener un respaldo, o importar un archivo previamente guardado.</p>
+                <div className={`p-8 rounded-3xl border shadow-sm ${isDarkMode ? 'bg-white/5 border-white/10' : 'bg-white border-slate-200'}`}>
+                  <p className={`${isDarkMode ? 'text-gray-400' : 'text-slate-500'} mb-6 font-medium`}>Puedes exportar todos los datos del sistema (alumnos, registros, proyectos y categorías) a un archivo JSON para tener un respaldo, o importar un archivo previamente guardado.</p>
                   <div className="flex flex-wrap gap-4">
                     <button onClick={() => {
                       const data = { students, categories, projects };
@@ -4125,7 +4792,7 @@ const App = () => {
                   
                   <div className="w-full mt-8 space-y-6">
                     {rejectedNotifications.map((notification, index) => (
-                      <div key={notification.id} className="bg-slate-50 border border-slate-200 rounded-3xl p-6 text-left">
+                      <div key={notification.id || `notif-${index}`} className="bg-slate-50 border border-slate-200 rounded-3xl p-6 text-left">
                         <div className="flex justify-between items-start mb-4">
                           <div>
                             <h3 className="font-semibold text-slate-900 text-xl">{notification.date}</h3>
@@ -4203,42 +4870,42 @@ const App = () => {
       </div>
       {/* MODAL PERFIL USUARIO (ALUMNO) */}
       {showProfileModal && editingProfileForm && (
-        <div className="fixed inset-0 bg-slate-900/95 backdrop-blur-3xl flex items-center justify-center p-4 z-[100] overflow-y-auto">
-          <div className="bg-white rounded-[2.5rem] sm:rounded-[5rem] p-6 sm:p-12 md:p-20 w-full max-w-4xl shadow-2xl my-auto border-t-[8px] sm:border-t-[16px] border-indigo-600 animate-in zoom-in-95 duration-500 relative">
-            <button onClick={() => setShowProfileModal(false)} className="absolute top-4 right-4 sm:top-10 sm:right-10 p-3 sm:p-6 text-slate-300 hover:text-red-500 transition-colors bg-slate-50 rounded-full border border-slate-100 shadow-inner"><X size={24}/></button>
+        <div className={`fixed inset-0 backdrop-blur-3xl flex items-center justify-center p-4 z-[100] overflow-y-auto ${isDarkMode ? 'bg-black/90' : 'bg-slate-900/95'}`}>
+          <div className={`rounded-[2.5rem] sm:rounded-[5rem] p-6 sm:p-12 md:p-20 w-full max-w-4xl shadow-2xl my-auto border-t-[8px] sm:border-t-[16px] border-indigo-600 animate-in zoom-in-95 duration-500 relative ${isDarkMode ? 'bg-[#1a1a1a] border-white/5' : 'bg-white'}`}>
+            <button onClick={() => setShowProfileModal(false)} className={`absolute top-4 right-4 sm:top-10 sm:right-10 p-3 sm:p-6 rounded-full border shadow-inner transition-colors ${isDarkMode ? 'bg-white/5 border-white/10 text-gray-500 hover:text-red-500' : 'bg-slate-50 border-slate-100 text-slate-300 hover:text-red-500'}`}><X size={24}/></button>
             
             <div className="flex flex-col gap-8 sm:gap-12 items-start w-full">
               <div className="w-full space-y-6 sm:space-y-10">
                 <div>
-                  <h3 className="text-3xl sm:text-6xl font-black text-slate-900 tracking-tighter">Mi Perfil</h3>
-                  <div className="text-slate-400 font-black uppercase tracking-[0.4em] text-[10px] sm:text-[12px] mt-2 flex items-center gap-4">
-                    <div className="w-8 sm:w-12 h-1 bg-indigo-100"></div> {userRole !== 'user' ? 'Información del Administrador' : 'Información del Estudiante'}
+                  <h3 className={`text-3xl sm:text-6xl font-black tracking-tighter ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>Mi Perfil</h3>
+                  <div className={`font-black uppercase tracking-[0.4em] text-[10px] sm:text-[12px] mt-2 flex items-center gap-4 ${isDarkMode ? 'text-gray-500' : 'text-slate-400'}`}>
+                    <div className={`w-8 sm:w-12 h-1 ${isDarkMode ? 'bg-white/10' : 'bg-indigo-100'}`}></div> {userRole !== 'user' ? 'Información del Administrador' : 'Información del Estudiante'}
                   </div>
                 </div>
 
                 {userRole === 'user' && (
                   <div className="grid grid-cols-1 gap-4 sm:gap-6">
-                    <div className="bg-slate-50 p-6 sm:p-10 rounded-[2rem] sm:rounded-[3.5rem] border border-slate-100 shadow-inner space-y-4 sm:space-y-6">
-                      <h4 className="text-[10px] sm:text-xs font-black text-slate-400 uppercase tracking-widest">Estatus Actual</h4>
+                    <div className={`p-6 sm:p-10 rounded-[2rem] sm:rounded-[3.5rem] border shadow-inner space-y-4 sm:space-y-6 ${isDarkMode ? 'bg-white/5 border-white/10' : 'bg-slate-50 border-slate-100'}`}>
+                      <h4 className={`text-[10px] sm:text-xs font-black uppercase tracking-widest ${isDarkMode ? 'text-gray-500' : 'text-slate-400'}`}>Estatus Actual</h4>
                       <div className="flex items-center gap-3 sm:gap-4">
                         <div className={`w-3 h-3 sm:w-4 sm:h-4 rounded-full animate-pulse shadow-lg ${(STUDENT_STATUS as any)[editingProfileForm.status]?.color || 'bg-yellow-400 shadow-yellow-400/20'}`}></div>
-                        <span className="text-xl sm:text-2xl font-black text-slate-900 tracking-tight">{editingProfileForm.status}</span>
+                        <span className={`text-xl sm:text-2xl font-black tracking-tight ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>{editingProfileForm.status}</span>
                       </div>
                     </div>
 
-                    <div className="bg-slate-50 p-6 sm:p-10 rounded-[2rem] sm:rounded-[3.5rem] border border-slate-100 shadow-inner space-y-4 sm:space-y-6">
-                      <h4 className="text-[10px] sm:text-xs font-black text-slate-400 uppercase tracking-widest">Proyectos Asignados</h4>
+                    <div className={`p-6 sm:p-10 rounded-[2rem] sm:rounded-[3.5rem] border shadow-inner space-y-4 sm:space-y-6 ${isDarkMode ? 'bg-white/5 border-white/10' : 'bg-slate-50 border-slate-100'}`}>
+                      <h4 className={`text-[10px] sm:text-xs font-black uppercase tracking-widest ${isDarkMode ? 'text-gray-500' : 'text-slate-400'}`}>Proyectos Asignados</h4>
                       <div className="space-y-3 sm:space-y-4">
-                        {userProfile.projectIds?.length > 0 ? userProfile.projectIds.map((pid: string) => {
+                        {userProfile.projectIds?.length > 0 ? userProfile.projectIds.map((pid: string, idx: number) => {
                           const p = projects.find((proj: any) => proj.id === pid);
                           return (
-                            <div key={pid} className="flex items-center gap-3 sm:gap-4 p-3 sm:p-4 bg-white rounded-xl sm:rounded-2xl border border-slate-100 shadow-sm">
+                            <div key={`${pid}-${idx}`} className={`flex items-center gap-3 sm:gap-4 p-3 sm:p-4 rounded-xl sm:rounded-2xl border shadow-sm ${isDarkMode ? 'bg-white/5 border-white/10' : 'bg-white border-slate-100'}`}>
                               <div className="w-2 h-2 sm:w-3 sm:h-3 rounded-full" style={{ backgroundColor: p?.color || '#cbd5e1' }}></div>
-                              <span className="text-[10px] sm:text-xs font-black uppercase text-slate-700 truncate">{p?.name || pid}</span>
+                              <span className={`text-[10px] sm:text-xs font-black uppercase truncate ${isDarkMode ? 'text-gray-300' : 'text-slate-700'}`}>{p?.name || pid}</span>
                             </div>
                           );
                         }) : (
-                          <p className="text-[10px] font-black text-slate-300 uppercase tracking-widest">Ningún proyecto asignado</p>
+                          <p className={`text-[10px] font-black uppercase tracking-widest ${isDarkMode ? 'text-gray-600' : 'text-slate-300'}`}>Ningún proyecto asignado</p>
                         )}
                       </div>
                     </div>
@@ -4247,68 +4914,62 @@ const App = () => {
 
                 <div className="grid grid-cols-1 gap-4 sm:gap-6">
                   <div className="space-y-2 sm:space-y-4">
-                    <label className="text-[10px] sm:text-[11px] font-black text-slate-400 uppercase tracking-widest block ml-4">Nombre(s)</label>
-                    <input type="text" className="w-full p-4 sm:p-6 border-2 sm:border-4 border-slate-50 rounded-2xl sm:rounded-[2rem] bg-slate-50 text-lg sm:text-xl font-black outline-none focus:bg-white transition-all shadow-inner" value={editingProfileForm.firstName || ''} onChange={e => setEditingProfileForm({...editingProfileForm, firstName: e.target.value})} />
+                    <label className={`text-[10px] sm:text-[11px] font-black uppercase tracking-widest block ml-4 ${isDarkMode ? 'text-gray-500' : 'text-slate-400'}`}>Nombre(s)</label>
+                    <input type="text" className={`w-full p-4 sm:p-6 border-2 sm:border-4 rounded-2xl sm:rounded-[2rem] text-lg sm:text-xl font-black outline-none transition-all shadow-inner ${isDarkMode ? 'bg-white/5 border-white/5 text-white focus:bg-white/10' : 'bg-slate-50 border-slate-50 text-slate-900 focus:bg-white'}`} value={editingProfileForm.firstName || ''} onChange={e => setEditingProfileForm({...editingProfileForm, firstName: e.target.value})} />
                   </div>
                   <div className="space-y-2 sm:space-y-4">
-                    <label className="text-[10px] sm:text-[11px] font-black text-slate-400 uppercase tracking-widest block ml-4">Apellido Paterno</label>
-                    <input type="text" className="w-full p-4 sm:p-6 border-2 sm:border-4 border-slate-50 rounded-2xl sm:rounded-[2rem] bg-slate-50 text-lg sm:text-xl font-black outline-none focus:bg-white transition-all shadow-inner" value={editingProfileForm.lastNamePaterno || ''} onChange={e => setEditingProfileForm({...editingProfileForm, lastNamePaterno: e.target.value})} />
+                    <label className={`text-[10px] sm:text-[11px] font-black uppercase tracking-widest block ml-4 ${isDarkMode ? 'text-gray-500' : 'text-slate-400'}`}>Apellido Paterno</label>
+                    <input type="text" className={`w-full p-4 sm:p-6 border-2 sm:border-4 rounded-2xl sm:rounded-[2rem] text-lg sm:text-xl font-black outline-none transition-all shadow-inner ${isDarkMode ? 'bg-white/5 border-white/5 text-white focus:bg-white/10' : 'bg-slate-50 border-slate-50 text-slate-900 focus:bg-white'}`} value={editingProfileForm.lastNamePaterno || ''} onChange={e => setEditingProfileForm({...editingProfileForm, lastNamePaterno: e.target.value})} />
                   </div>
                   <div className="space-y-2 sm:space-y-4">
-                    <label className="text-[10px] sm:text-[11px] font-black text-slate-400 uppercase tracking-widest block ml-4">Apellido Materno</label>
-                    <input type="text" className="w-full p-4 sm:p-6 border-2 sm:border-4 border-slate-50 rounded-2xl sm:rounded-[2rem] bg-slate-50 text-lg sm:text-xl font-black outline-none focus:bg-white transition-all shadow-inner" value={editingProfileForm.lastNameMaterno || ''} onChange={e => setEditingProfileForm({...editingProfileForm, lastNameMaterno: e.target.value})} />
+                    <label className={`text-[10px] sm:text-[11px] font-black uppercase tracking-widest block ml-4 ${isDarkMode ? 'text-gray-500' : 'text-slate-400'}`}>Apellido Materno</label>
+                    <input type="text" className={`w-full p-4 sm:p-6 border-2 sm:border-4 rounded-2xl sm:rounded-[2rem] text-lg sm:text-xl font-black outline-none transition-all shadow-inner ${isDarkMode ? 'bg-white/5 border-white/5 text-white focus:bg-white/10' : 'bg-slate-50 border-slate-50 text-slate-900 focus:bg-white'}`} value={editingProfileForm.lastNameMaterno || ''} onChange={e => setEditingProfileForm({...editingProfileForm, lastNameMaterno: e.target.value})} />
                   </div>
                   <div className="space-y-2 sm:space-y-4">
-                    <label className="text-[10px] sm:text-[11px] font-black text-slate-400 uppercase tracking-widest block ml-4">Correo Electrónico</label>
-                    <input type="email" className="w-full p-4 sm:p-6 border-2 sm:border-4 border-slate-50 rounded-2xl sm:rounded-[2rem] bg-slate-50 text-lg sm:text-xl font-black outline-none focus:bg-white transition-all shadow-inner" value={editingProfileForm.email || ''} onChange={e => setEditingProfileForm({...editingProfileForm, email: e.target.value})} />
+                    <label className={`text-[10px] sm:text-[11px] font-black uppercase tracking-widest block ml-4 ${isDarkMode ? 'text-gray-500' : 'text-slate-400'}`}>Correo Electrónico</label>
+                    <input type="email" className={`w-full p-4 sm:p-6 border-2 sm:border-4 rounded-2xl sm:rounded-[2rem] text-lg sm:text-xl font-black outline-none transition-all shadow-inner ${isDarkMode ? 'bg-white/5 border-white/5 text-white focus:bg-white/10' : 'bg-slate-50 border-slate-50 text-slate-900 focus:bg-white'}`} value={editingProfileForm.email || ''} onChange={e => setEditingProfileForm({...editingProfileForm, email: e.target.value})} />
                   </div>
                   <div className="space-y-2 sm:space-y-4">
-                    <label className="text-[10px] sm:text-[11px] font-black text-slate-400 uppercase tracking-widest block ml-4">Teléfono</label>
-                    <input type="tel" className="w-full p-4 sm:p-6 border-2 sm:border-4 border-slate-50 rounded-2xl sm:rounded-[2rem] bg-slate-50 text-lg sm:text-xl font-black outline-none focus:bg-white transition-all shadow-inner" value={editingProfileForm.phone || ''} onChange={e => setEditingProfileForm({...editingProfileForm, phone: e.target.value})} />
+                    <label className={`text-[10px] sm:text-[11px] font-black uppercase tracking-widest block ml-4 ${isDarkMode ? 'text-gray-500' : 'text-slate-400'}`}>Teléfono</label>
+                    <input type="tel" maxLength={10} className={`w-full p-4 sm:p-6 border-2 sm:border-4 rounded-2xl sm:rounded-[2rem] text-lg sm:text-xl font-black outline-none transition-all shadow-inner ${isDarkMode ? 'bg-white/5 border-white/5 text-white focus:bg-white/10' : 'bg-slate-50 border-slate-50 text-slate-900 focus:bg-white'}`} value={editingProfileForm.phone || ''} onChange={e => {
+                      if (/[^0-9]/.test(e.target.value)) {
+                        toast.error("Solo se permiten números en el teléfono", { id: 'phone-error' });
+                      }
+                      setEditingProfileForm({...editingProfileForm, phone: e.target.value.replace(/\D/g, '').slice(0, 10)});
+                    }} />
                   </div>
                   <div className="space-y-2 sm:space-y-4">
-                    <label className="text-[10px] sm:text-[11px] font-black text-slate-400 uppercase tracking-widest block ml-4">Teléfono de Emergencia</label>
-                    <input type="tel" className="w-full p-4 sm:p-6 border-2 sm:border-4 border-slate-50 rounded-2xl sm:rounded-[2rem] bg-slate-50 text-lg sm:text-xl font-black outline-none focus:bg-white transition-all shadow-inner" value={editingProfileForm.emergencyPhone || ''} onChange={e => setEditingProfileForm({...editingProfileForm, emergencyPhone: e.target.value})} />
+                    <label className="text-[10px] sm:text-[11px] font-black uppercase tracking-widest block ml-4 text-red-500">SOS (Teléfono de Emergencia)</label>
+                    <input type="tel" maxLength={10} className={`w-full p-4 sm:p-6 border-2 sm:border-4 rounded-2xl sm:rounded-[2rem] text-lg sm:text-xl font-black outline-none transition-all shadow-inner ${isDarkMode ? 'bg-red-500/10 border-red-500/20 text-red-400 focus:bg-red-500/20 focus:border-red-500/50' : 'bg-red-50 border-red-100 text-red-900 focus:bg-white focus:border-red-300'}`} value={editingProfileForm.emergencyPhone || ''} onChange={e => {
+                      if (/[^0-9]/.test(e.target.value)) {
+                        toast.error("Solo se permiten números en el teléfono", { id: 'phone-error' });
+                      }
+                      setEditingProfileForm({...editingProfileForm, emergencyPhone: e.target.value.replace(/\D/g, '').slice(0, 10)});
+                    }} />
                   </div>
                   {userRole === 'user' && (
                     <div className="space-y-2 sm:space-y-4">
-                      <label className="text-[10px] sm:text-[11px] font-black text-slate-400 uppercase tracking-widest block ml-4">Ciclo de Brigada</label>
-                      <input type="text" className="w-full p-4 sm:p-6 border-2 sm:border-4 border-slate-50 rounded-2xl sm:rounded-[2rem] bg-slate-50 text-lg sm:text-xl font-black outline-none focus:bg-white transition-all shadow-inner" placeholder="Ej. 111" value={editingProfileForm.brigadePeriod || ''} onChange={e => setEditingProfileForm({...editingProfileForm, brigadePeriod: e.target.value})} />
+                      <label className={`text-[10px] sm:text-[11px] font-black uppercase tracking-widest block ml-4 ${isDarkMode ? 'text-gray-500' : 'text-slate-400'}`}>Ciclo de Brigada</label>
+                      <input type="text" className={`w-full p-4 sm:p-6 border-2 sm:border-4 rounded-2xl sm:rounded-[2rem] text-lg sm:text-xl font-black outline-none transition-all shadow-inner ${isDarkMode ? 'bg-white/5 border-white/5 text-white focus:bg-white/10' : 'bg-slate-50 border-slate-50 text-slate-900 focus:bg-white'}`} placeholder="Ej. 111" value={editingProfileForm.brigadePeriod || ''} onChange={e => setEditingProfileForm({...editingProfileForm, brigadePeriod: e.target.value})} />
                     </div>
                   )}
                 </div>
 
-                <div className="space-y-4">
-                  <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest block ml-4">Habilidades y Software</label>
-                  <div className="flex flex-wrap gap-2 p-4 bg-slate-50 rounded-[2rem] border-4 border-slate-50 shadow-inner">
-                    {(editingProfileForm.skills || []).map((skill: string, i: number) => (
-                      <span key={i} className="bg-white border border-slate-200 text-slate-600 px-4 py-2 rounded-xl text-xs font-bold shadow-sm flex items-center gap-2">
-                        {skill}
-                        <button onClick={() => setEditingProfileForm({...editingProfileForm, skills: editingProfileForm.skills.filter((_: any, idx: number) => idx !== i)})} className="text-slate-300 hover:text-red-500 transition-colors">
-                          <X size={14} />
-                        </button>
-                      </span>
-                    ))}
-                    <input 
-                      type="text" 
-                      placeholder="Agregar habilidad..." 
-                      className="flex-1 min-w-[150px] bg-transparent border-none outline-none text-sm font-bold p-2"
-                      onKeyDown={(e: any) => {
-                        if (e.key === 'Enter' && e.target.value.trim()) {
-                          const newSkill = e.target.value.trim();
-                          if (!(editingProfileForm.skills || []).includes(newSkill)) {
-                            setEditingProfileForm({...editingProfileForm, skills: [...(editingProfileForm.skills || []), newSkill]});
-                          }
-                          e.target.value = '';
-                        }
-                      }}
-                    />
-                  </div>
+                <div className="flex flex-col gap-8">
+                  <SkillEditor 
+                    skillRatings={editingProfileForm.skillRatings || []} 
+                    onChange={(newRatings) => setEditingProfileForm({...editingProfileForm, skillRatings: newRatings})} 
+                    isDarkMode={isDarkMode}
+                  />
+                  <ProfileSkillMap 
+                    skillRatings={editingProfileForm.skillRatings || []} 
+                    isDarkMode={isDarkMode}
+                  />
                 </div>
 
                 <button 
                   onClick={handleUpdateProfile}
-                  className="w-full py-6 bg-indigo-600 text-white rounded-[2.5rem] font-black text-lg uppercase tracking-widest shadow-2xl shadow-indigo-600/30 hover:bg-indigo-700 transition-all active:scale-95"
+                  className="w-full py-5 bg-[#5A32FA] text-white rounded-full font-black text-lg uppercase tracking-widest shadow-xl hover:bg-[#4A22EA] transition-all active:scale-95"
                 >
                   Guardar Cambios
                 </button>
@@ -4320,11 +4981,11 @@ const App = () => {
 
       {/* MODAL ALTA/EDICIÓN ALUMNO */}
       {showAddStudent && (
-        <div className="fixed inset-0 bg-slate-900/95 backdrop-blur-3xl flex items-center justify-center p-4 z-[100] overflow-y-auto">
-          <div className="bg-white rounded-[2.5rem] sm:rounded-[5rem] p-6 sm:p-12 md:p-20 w-full max-w-5xl shadow-2xl my-auto border-t-[8px] sm:border-t-[16px] border-indigo-600 animate-in zoom-in-95 duration-500 relative">
-            <button onClick={()=>{setShowAddStudent(false); setStudentFormErrors({});}} className="absolute top-4 right-4 sm:top-10 sm:right-10 p-3 sm:p-6 text-slate-300 hover:text-red-500 transition-colors bg-slate-50 rounded-full border border-slate-100 shadow-inner"><X size={24}/></button>
-            <h3 className="text-3xl sm:text-6xl font-black mb-2 sm:mb-4 text-slate-900 tracking-tighter">{showEditStudent ? 'Modificar Perfil' : 'Alta de Prestador'}</h3>
-            <div className="text-slate-400 mb-6 sm:mb-12 font-black uppercase tracking-[0.4em] text-[10px] sm:text-[12px] flex items-center gap-4"><div className="w-8 sm:w-12 h-1 bg-indigo-100"></div> Gestión Técnica de Expedientes</div>
+        <div className={`fixed inset-0 backdrop-blur-3xl flex items-center justify-center p-4 z-[100] overflow-y-auto ${isDarkMode ? 'bg-black/90' : 'bg-slate-900/95'}`}>
+          <div className={`rounded-[2.5rem] sm:rounded-[5rem] p-6 sm:p-12 md:p-20 w-full max-w-5xl shadow-2xl my-auto border-t-[8px] sm:border-t-[16px] border-indigo-600 animate-in zoom-in-95 duration-500 relative ${isDarkMode ? 'bg-[#1a1a1a] border-white/5' : 'bg-white'}`}>
+            <button onClick={()=>{setShowAddStudent(false); setStudentFormErrors({});}} className={`absolute top-4 right-4 sm:top-10 sm:right-10 p-3 sm:p-6 rounded-full border shadow-inner transition-colors ${isDarkMode ? 'bg-white/5 border-white/10 text-gray-500 hover:text-red-500' : 'bg-slate-50 border-slate-100 text-slate-300 hover:text-red-500'}`}><X size={24}/></button>
+            <h3 className={`text-3xl sm:text-6xl font-black mb-2 sm:mb-4 tracking-tighter ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>{showEditStudent ? 'Modificar Perfil' : 'Alta de Prestador'}</h3>
+            <div className={`mb-6 sm:mb-12 font-black uppercase tracking-[0.4em] text-[10px] sm:text-[12px] flex items-center gap-4 ${isDarkMode ? 'text-gray-500' : 'text-slate-400'}`}><div className={`w-8 sm:w-12 h-1 ${isDarkMode ? 'bg-white/10' : 'bg-indigo-100'}`}></div> Gestión Técnica de Expedientes</div>
 
              {Object.keys(studentFormErrors).length > 0 && (
               <div className="p-4 sm:p-6 mb-6 sm:mb-12 bg-red-50 text-red-700 rounded-2xl sm:rounded-[2rem] border-2 sm:border-4 border-red-200 flex items-center gap-3 sm:gap-5 font-black text-[11px] sm:text-[13px] uppercase animate-bounce shadow-lg">
@@ -4337,22 +4998,22 @@ const App = () => {
               <div className="space-y-4 sm:space-y-6">
                 <div className="flex items-center gap-3 mb-2">
                   <div className="w-6 sm:w-8 h-1 bg-indigo-500 rounded-full"></div>
-                  <h4 className="text-xs sm:text-sm font-black text-slate-900 uppercase tracking-widest">Información Personal</h4>
+                  <h4 className={`text-xs sm:text-sm font-black uppercase tracking-widest ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>Información Personal</h4>
                 </div>
                 <div className="grid grid-cols-1 gap-4 sm:gap-6">
                   <div className="space-y-2 sm:space-y-3">
-                    <label className="text-[9px] sm:text-[10px] font-black text-slate-400 uppercase tracking-widest block ml-4">Nombre(s)</label>
-                    <input type="text" className={`w-full p-4 sm:p-5 border-2 ${studentFormErrors.firstName ? 'border-red-500' : 'border-slate-100'} rounded-xl sm:rounded-2xl bg-slate-50 text-base sm:text-lg font-bold outline-none focus:bg-white focus:border-indigo-500 transition-all shadow-sm`} placeholder="Ej. Mariana" value={studentForm.firstName || ''} onChange={e => setStudentForm({...studentForm, firstName: e.target.value})} />
+                    <label className={`text-[9px] sm:text-[10px] font-black uppercase tracking-widest block ml-4 ${isDarkMode ? 'text-gray-500' : 'text-slate-400'}`}>Nombre(s)</label>
+                    <input type="text" className={`w-full p-4 sm:p-5 border-2 rounded-xl sm:rounded-2xl text-base sm:text-lg font-bold outline-none transition-all shadow-sm ${studentFormErrors.firstName ? 'border-red-500' : (isDarkMode ? 'bg-white/5 border-white/5 text-white focus:bg-white/10' : 'bg-slate-50 border-slate-100 text-slate-900 focus:bg-white focus:border-indigo-500')}`} placeholder="Ej. Mariana" value={studentForm.firstName || ''} onChange={e => setStudentForm({...studentForm, firstName: e.target.value})} />
                     {studentFormErrors.firstName && <p className="text-red-500 text-[10px] font-bold ml-4">{studentFormErrors.firstName}</p>}
                   </div>
                   <div className="space-y-3">
-                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block ml-4">Apellido Paterno</label>
-                    <input type="text" className={`w-full p-5 border-2 ${studentFormErrors.lastNamePaterno ? 'border-red-500' : 'border-slate-100'} rounded-2xl bg-slate-50 text-lg font-bold outline-none focus:bg-white focus:border-indigo-500 transition-all shadow-sm`} placeholder="Ej. Soler" value={studentForm.lastNamePaterno || ''} onChange={e => setStudentForm({...studentForm, lastNamePaterno: e.target.value})} />
+                    <label className={`text-[10px] font-black uppercase tracking-widest block ml-4 ${isDarkMode ? 'text-gray-500' : 'text-slate-400'}`}>Apellido Paterno</label>
+                    <input type="text" className={`w-full p-5 border-2 rounded-2xl text-lg font-bold outline-none transition-all shadow-sm ${studentFormErrors.lastNamePaterno ? 'border-red-500' : (isDarkMode ? 'bg-white/5 border-white/5 text-white focus:bg-white/10' : 'bg-slate-50 border-slate-100 text-slate-900 focus:bg-white focus:border-indigo-500')}`} placeholder="Ej. Soler" value={studentForm.lastNamePaterno || ''} onChange={e => setStudentForm({...studentForm, lastNamePaterno: e.target.value})} />
                     {studentFormErrors.lastNamePaterno && <p className="text-red-500 text-[10px] font-bold ml-4">{studentFormErrors.lastNamePaterno}</p>}
                   </div>
                   <div className="space-y-3">
-                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block ml-4">Apellido Materno</label>
-                    <input type="text" className={`w-full p-5 border-2 ${studentFormErrors.lastNameMaterno ? 'border-red-500' : 'border-slate-100'} rounded-2xl bg-slate-50 text-lg font-bold outline-none focus:bg-white focus:border-indigo-500 transition-all shadow-sm`} placeholder="Ej. Rojas" value={studentForm.lastNameMaterno || ''} onChange={e => setStudentForm({...studentForm, lastNameMaterno: e.target.value})} />
+                    <label className={`text-[10px] font-black uppercase tracking-widest block ml-4 ${isDarkMode ? 'text-gray-500' : 'text-slate-400'}`}>Apellido Materno</label>
+                    <input type="text" className={`w-full p-5 border-2 rounded-2xl text-lg font-bold outline-none transition-all shadow-sm ${studentFormErrors.lastNameMaterno ? 'border-red-500' : (isDarkMode ? 'bg-white/5 border-white/5 text-white focus:bg-white/10' : 'bg-slate-50 border-slate-100 text-slate-900 focus:bg-white focus:border-indigo-500')}`} placeholder="Ej. Rojas" value={studentForm.lastNameMaterno || ''} onChange={e => setStudentForm({...studentForm, lastNameMaterno: e.target.value})} />
                     {studentFormErrors.lastNameMaterno && <p className="text-red-500 text-[10px] font-bold ml-4">{studentFormErrors.lastNameMaterno}</p>}
                   </div>
                 </div>
@@ -4362,31 +5023,31 @@ const App = () => {
               <div className="space-y-6">
                 <div className="flex items-center gap-3 mb-2">
                   <div className="w-8 h-1 bg-indigo-500 rounded-full"></div>
-                  <h4 className="text-sm font-black text-slate-900 uppercase tracking-widest">Datos Académicos</h4>
+                  <h4 className={`text-sm font-black uppercase tracking-widest ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>Datos Académicos</h4>
                 </div>
                 <div className="grid grid-cols-1 gap-6">
                   <div className="space-y-3">
-                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block ml-4">Matrícula</label>
-                    <input type="text" className={`w-full p-5 border-2 ${studentFormErrors.studentId ? 'border-red-500' : 'border-slate-100'} rounded-2xl bg-slate-50 text-lg font-bold outline-none focus:bg-white focus:border-indigo-500 transition-all shadow-sm`} placeholder="Ej. 315123456" value={studentForm.studentId || ''} onChange={e => setStudentForm({...studentForm, studentId: e.target.value})} />
+                    <label className={`text-[10px] font-black uppercase tracking-widest block ml-4 ${isDarkMode ? 'text-gray-500' : 'text-slate-400'}`}>Matrícula</label>
+                    <input type="text" className={`w-full p-5 border-2 rounded-2xl text-lg font-bold outline-none transition-all shadow-sm ${studentFormErrors.studentId ? 'border-red-500' : (isDarkMode ? 'bg-white/5 border-white/5 text-white focus:bg-white/10' : 'bg-slate-50 border-slate-100 text-slate-900 focus:bg-white focus:border-indigo-500')}`} placeholder="Ej. 315123456" value={studentForm.studentId || ''} onChange={e => setStudentForm({...studentForm, studentId: e.target.value})} />
                     {studentFormErrors.studentId && <p className="text-red-500 text-[10px] font-bold ml-4">{studentFormErrors.studentId}</p>}
                   </div>
                   <div className="space-y-3">
-                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block ml-4">Tipo de Servicio</label>
-                    <select className="w-full p-5 border-2 border-slate-100 rounded-2xl bg-slate-50 text-sm font-bold outline-none focus:bg-white focus:border-indigo-500 shadow-sm transition-all" value={studentForm.serviceType || ''} onChange={e => setStudentForm({...studentForm, serviceType: e.target.value as 'Prestador' | 'Brigadista'})}>
+                    <label className={`text-[10px] font-black uppercase tracking-widest block ml-4 ${isDarkMode ? 'text-gray-500' : 'text-slate-400'}`}>Tipo de Servicio</label>
+                    <select className={`w-full p-5 border-2 rounded-2xl text-sm font-bold outline-none shadow-sm transition-all ${isDarkMode ? 'bg-white/5 border-white/5 text-white focus:bg-white/10' : 'bg-slate-50 border-slate-100 text-slate-900 focus:bg-white focus:border-indigo-500'}`} value={studentForm.serviceType || ''} onChange={e => setStudentForm({...studentForm, serviceType: e.target.value as 'Prestador' | 'Brigadista'})}>
                       <option value="Prestador">Prestador</option>
                       <option value="Brigadista">Brigadista</option>
                     </select>
                   </div>
                   <div className="space-y-3">
-                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block ml-4 flex items-center gap-2">
+                    <label className={`text-[10px] font-black uppercase tracking-widest block ml-4 flex items-center gap-2 ${isDarkMode ? 'text-gray-500' : 'text-slate-400'}`}>
                       Ciclo Brigada <span className="text-red-500">*</span>
                     </label>
-                    <input type="text" placeholder="Ej. 111" maxLength={3} className={`w-full p-5 border-2 ${studentFormErrors.brigadePeriod ? 'border-red-500' : 'border-slate-100'} rounded-2xl bg-slate-50 text-lg font-bold outline-none focus:bg-white focus:border-indigo-500 shadow-sm transition-all`} value={studentForm.brigadePeriod || ''} onChange={e => { const val = e.target.value.replace(/\D/g, '').slice(0, 3); setStudentForm({...studentForm, brigadePeriod: val}); }} />
+                    <input type="text" placeholder="Ej. 111" maxLength={3} className={`w-full p-5 border-2 rounded-2xl text-lg font-bold outline-none shadow-sm transition-all ${studentFormErrors.brigadePeriod ? 'border-red-500' : (isDarkMode ? 'bg-white/5 border-white/5 text-white focus:bg-white/10' : 'bg-slate-50 border-slate-100 text-slate-900 focus:bg-white focus:border-indigo-500')}`} value={studentForm.brigadePeriod || ''} onChange={e => { const val = e.target.value.replace(/\D/g, '').slice(0, 3); setStudentForm({...studentForm, brigadePeriod: val}); }} />
                     {studentFormErrors.brigadePeriod && <p className="text-red-500 text-[10px] font-bold ml-4">{studentFormErrors.brigadePeriod}</p>}
                   </div>
                   <div className="space-y-3">
-                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block ml-4">Nickname</label>
-                    <input type="text" className="w-full p-5 border-2 border-slate-100 rounded-2xl bg-slate-50 text-lg font-bold outline-none focus:bg-white focus:border-indigo-500 transition-all shadow-sm" placeholder="Opcional" value={studentForm.nickname || ''} onChange={e => setStudentForm({...studentForm, nickname: e.target.value})} />
+                    <label className={`text-[10px] font-black uppercase tracking-widest block ml-4 ${isDarkMode ? 'text-gray-500' : 'text-slate-400'}`}>Nickname</label>
+                    <input type="text" className={`w-full p-5 border-2 rounded-2xl text-lg font-bold outline-none transition-all shadow-sm ${isDarkMode ? 'bg-white/5 border-white/5 text-white focus:bg-white/10' : 'bg-slate-50 border-slate-100 text-slate-900 focus:bg-white focus:border-indigo-500'}`} placeholder="Opcional" value={studentForm.nickname || ''} onChange={e => setStudentForm({...studentForm, nickname: e.target.value})} />
                   </div>
                   <div className="space-y-3">
                     <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block ml-4">Programa Académico</label>
@@ -4441,12 +5102,22 @@ const App = () => {
                   </div>
                   <div className="space-y-3">
                     <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block ml-4">Teléfono Personal</label>
-                    <input type="tel" placeholder="10 dígitos" className={`w-full p-5 border-2 ${studentFormErrors.phone ? 'border-red-500' : 'border-slate-100'} rounded-2xl bg-slate-50 text-lg font-bold outline-none focus:bg-white focus:border-indigo-500 shadow-sm`} value={studentForm.phone || ''} onChange={e => setStudentForm({...studentForm, phone: e.target.value.replace(/\D/g, '')})} />
+                    <input type="tel" maxLength={10} placeholder="10 dígitos" className={`w-full p-5 border-2 ${studentFormErrors.phone ? 'border-red-500' : 'border-slate-100'} rounded-2xl bg-slate-50 text-lg font-bold outline-none focus:bg-white focus:border-indigo-500 shadow-sm`} value={studentForm.phone || ''} onChange={e => {
+                      if (/[^0-9]/.test(e.target.value)) {
+                        toast.error("Solo se permiten números en el teléfono", { id: 'phone-error' });
+                      }
+                      setStudentForm({...studentForm, phone: e.target.value.replace(/\D/g, '').slice(0, 10)});
+                    }} />
                     {studentFormErrors.phone && <p className="text-red-500 text-[10px] font-bold ml-4">{studentFormErrors.phone}</p>}
                   </div>
                   <div className="space-y-3">
-                    <label className="text-[10px] font-black text-red-500 uppercase tracking-widest block ml-4">Contacto SOS (Emergencia)</label>
-                    <input type="tel" placeholder="10 dígitos" className={`w-full p-5 border-2 ${studentFormErrors.emergencyPhone ? 'border-red-500' : 'border-red-100'} rounded-2xl bg-red-50/30 text-lg font-bold outline-none focus:bg-white focus:border-red-500 text-red-900 shadow-sm`} value={studentForm.emergencyPhone || ''} onChange={e => setStudentForm({...studentForm, emergencyPhone: e.target.value.replace(/\D/g, '')})} />
+                    <label className="text-[10px] font-black text-red-500 uppercase tracking-widest block ml-4">SOS (Teléfono de Emergencia)</label>
+                    <input type="tel" maxLength={10} placeholder="10 dígitos" className={`w-full p-5 border-2 ${studentFormErrors.emergencyPhone ? 'border-red-500' : 'border-red-100'} rounded-2xl bg-red-50/30 text-lg font-bold outline-none focus:bg-white focus:border-red-500 text-red-900 shadow-sm`} value={studentForm.emergencyPhone || ''} onChange={e => {
+                      if (/[^0-9]/.test(e.target.value)) {
+                        toast.error("Solo se permiten números en el teléfono", { id: 'phone-error' });
+                      }
+                      setStudentForm({...studentForm, emergencyPhone: e.target.value.replace(/\D/g, '').slice(0, 10)});
+                    }} />
                     {studentFormErrors.emergencyPhone && <p className="text-red-500 text-[10px] font-bold ml-4">{studentFormErrors.emergencyPhone}</p>}
                   </div>
                 </div>
@@ -4456,35 +5127,17 @@ const App = () => {
               <div className="space-y-6">
                 <div className="flex items-center gap-3 mb-2">
                   <div className="w-8 h-1 bg-indigo-500 rounded-full"></div>
-                  <h4 className="text-sm font-black text-slate-900 uppercase tracking-widest">Habilidades y Software</h4>
+                  <h4 className={`text-sm font-black uppercase tracking-widest ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>Habilidades y Software</h4>
                 </div>
-                <div className="bg-slate-50 p-6 rounded-[2rem] border-2 border-slate-100 shadow-inner">
-                  <div className="flex flex-wrap gap-2 mb-4">
-                    {(studentForm.skills || []).map((skill: string, i: number) => (
-                      <span key={i} className="bg-white border border-slate-200 text-slate-600 px-4 py-2 rounded-xl text-xs font-bold shadow-sm flex items-center gap-2">
-                        {skill}
-                        <button type="button" onClick={() => setStudentForm({...studentForm, skills: studentForm.skills.filter((_: any, idx: number) => idx !== i)})} className="text-slate-300 hover:text-red-500 transition-colors">
-                          <X size={14} />
-                        </button>
-                      </span>
-                    ))}
-                  </div>
-                  <input 
-                    type="text" 
-                    placeholder="Agregar habilidad y presionar Enter..." 
-                    className="w-full bg-white border-2 border-slate-100 outline-none text-sm font-bold p-4 rounded-xl focus:border-indigo-500 transition-all shadow-sm"
-                    onKeyDown={(e: any) => {
-                      if (e.key === 'Enter') {
-                        e.preventDefault();
-                        if (e.target.value.trim()) {
-                          const newSkill = e.target.value.trim();
-                          if (!(studentForm.skills || []).includes(newSkill)) {
-                            setStudentForm({...studentForm, skills: [...(studentForm.skills || []), newSkill]});
-                          }
-                          e.target.value = '';
-                        }
-                      }
-                    }}
+                <div className="flex flex-col gap-8">
+                  <SkillEditor 
+                    skillRatings={studentForm.skillRatings || []} 
+                    onChange={(newRatings) => setStudentForm({...studentForm, skillRatings: newRatings})} 
+                    isDarkMode={isDarkMode}
+                  />
+                  <ProfileSkillMap 
+                    skillRatings={studentForm.skillRatings || []} 
+                    isDarkMode={isDarkMode}
                   />
                 </div>
               </div>
@@ -4501,11 +5154,11 @@ const App = () => {
                   {studentFormErrors.projectIds && <p className="text-red-500 text-[10px] font-bold mb-4 ml-2">{studentFormErrors.projectIds}</p>}
                   <div className="grid grid-cols-1 gap-4">
                     {projects.map(p => (
-                      <label key={p.id} className={`flex flex-col gap-3 p-5 rounded-2xl border-2 transition-all cursor-pointer shadow-sm group ${studentForm.projectIds.includes(p.id) ? 'bg-white border-indigo-500 ring-4 ring-indigo-500/10' : 'bg-white border-transparent hover:border-slate-200'}`}>
+                      <label key={p.id} className={`flex flex-col gap-3 p-5 rounded-2xl border-2 transition-all cursor-pointer shadow-sm group ${(studentForm.projectIds || []).includes(p.id) ? 'bg-white border-indigo-500 ring-4 ring-indigo-500/10' : 'bg-white border-transparent hover:border-slate-200'}`}>
                         <div className="flex justify-between items-start">
                           <div className="w-3 h-3 rounded-full shadow-sm" style={{ backgroundColor: p.color }}></div>
-                          <input type="checkbox" className="w-5 h-5 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500" checked={studentForm.projectIds.includes(p.id)} onChange={e => {
-                            const ids = e.target.checked ? [...studentForm.projectIds, p.id] : studentForm.projectIds.filter(id => id !== p.id);
+                          <input type="checkbox" className="w-5 h-5 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500" checked={(studentForm.projectIds || []).includes(p.id)} onChange={e => {
+                            const ids = e.target.checked ? [...(studentForm.projectIds || []), p.id] : (studentForm.projectIds || []).filter(id => id !== p.id);
                             const newWorkStatus = ids.length > 0 ? 'Asignado' : 'Sin asignar';
                             setStudentForm({...studentForm, projectIds: ids, workStatus: newWorkStatus});
                           }} />
@@ -4524,12 +5177,12 @@ const App = () => {
                       <div className="col-span-full p-12 text-center bg-slate-50 rounded-[2rem] border-2 border-dashed border-slate-200">
                          <p className="text-slate-300 font-black uppercase tracking-widest text-[10px]">Asigna proyectos para gestionar sus tareas</p>
                       </div>
-                    ) : (studentForm.projectIds || []).map(pid => {
+                    ) : Array.from(new Set(studentForm.projectIds || [])).map(pid => {
                       const p = projects.find(pr => pr.id === pid);
                       const currentTags = (studentForm.projectTasks && studentForm.projectTasks[pid]) || [];
                       const currentInputValue = tagInputs[pid] || '';
                       const bankForProject = projectTagsBank[pid] || [];
-                      const suggestions = bankForProject.filter((t: string) => t.toLowerCase().includes(currentInputValue.toLowerCase()) && !currentTags.includes(t));
+                      const suggestions = Array.from(new Set(bankForProject.filter((t: string) => t.toLowerCase().includes(currentInputValue.toLowerCase()) && !currentTags.includes(t))));
                       const showSuggestions = activeSuggestionProject === pid && currentInputValue.length > 0 && suggestions.length > 0;
 
                        return (
@@ -4645,23 +5298,23 @@ const App = () => {
         </div>
       )}
         {showManualHours && (
-          <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-            <div className="bg-white rounded-[2rem] p-8 max-w-md w-full shadow-2xl">
-              <h2 className="text-2xl font-black mb-6">Agregar Horas Manuales</h2>
+          <div className={`fixed inset-0 z-50 flex items-center justify-center p-4 ${isDarkMode ? 'bg-black/70' : 'bg-black/50'}`}>
+            <div className={`rounded-[2rem] p-8 max-w-md w-full shadow-2xl border ${isDarkMode ? 'bg-[#1a1a1a] border-white/10' : 'bg-white border-slate-200'}`}>
+              <h2 className={`text-2xl font-black mb-6 ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>Agregar Horas Manuales</h2>
               <div className="space-y-4">
                 <div>
-                  <label className="block text-xs font-black text-slate-400 uppercase mb-2">Horas</label>
-                  <input type="number" className="w-full p-4 rounded-xl border border-slate-200" value={manualHoursForm.hours} onChange={e => setManualHoursForm({...manualHoursForm, hours: parseFloat(e.target.value)})} />
+                  <label className={`block text-xs font-black uppercase mb-2 ${isDarkMode ? 'text-gray-500' : 'text-slate-400'}`}>Horas</label>
+                  <input type="number" className={`w-full p-4 rounded-xl border outline-none transition-all ${isDarkMode ? 'bg-white/5 border-white/10 text-white focus:bg-white/10' : 'bg-slate-50 border-slate-200 text-slate-900 focus:bg-white'}`} value={manualHoursForm.hours} onChange={e => setManualHoursForm({...manualHoursForm, hours: parseFloat(e.target.value)})} />
                 </div>
                 <div>
-                  <label className="block text-xs font-black text-slate-400 uppercase mb-2">Categoría</label>
-                  <select className="w-full p-4 rounded-xl border border-slate-200" value={manualHoursForm.category} onChange={e => setManualHoursForm({...manualHoursForm, category: e.target.value})}>
+                  <label className={`block text-xs font-black uppercase mb-2 ${isDarkMode ? 'text-gray-500' : 'text-slate-400'}`}>Categoría</label>
+                  <select className={`w-full p-4 rounded-xl border outline-none transition-all ${isDarkMode ? 'bg-white/5 border-white/10 text-white focus:bg-white/10' : 'bg-slate-50 border-slate-200 text-slate-900 focus:bg-white'}`} value={manualHoursForm.category} onChange={e => setManualHoursForm({...manualHoursForm, category: e.target.value})}>
                     <option value="Otra Brigada">Otra Brigada</option>
                     <option value="ND en Sistema">ND en Sistema</option>
                   </select>
                 </div>
                 <div className="flex gap-4 mt-6">
-                  <button onClick={() => setShowManualHours(false)} className="flex-1 p-4 bg-slate-100 rounded-xl font-black">Cancelar</button>
+                  <button onClick={() => setShowManualHours(false)} className={`flex-1 p-4 rounded-xl font-black transition-colors ${isDarkMode ? 'bg-white/5 text-white hover:bg-white/10' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'}`}>Cancelar</button>
                   <button onClick={() => {
                     if (manualHoursForm.hours < 0.5) {
                       showErrorToast("El registro mínimo es de media hora");
@@ -4684,13 +5337,26 @@ const App = () => {
                     setStudents(prev => prev.map(s => s.id === selectedStudentId ? { ...s, records: [...(s.records || []), newRecord] } : s));
                     setShowManualHours(false);
                     showSuccessToast("Horas manuales agregadas");
-                  }} className="flex-1 p-4 bg-indigo-600 text-white rounded-xl font-black">Guardar</button>
+                  }} className="flex-1 p-4 bg-indigo-600 text-white rounded-xl font-black hover:bg-indigo-700 transition-all shadow-lg active:scale-95">Guardar</button>
                 </div>
               </div>
             </div>
           </div>
         )}
       </div>
+
+      <NotificationCenter 
+        isOpen={isNotificationCenterOpen}
+        onClose={() => setIsNotificationCenterOpen(false)}
+        notifications={notifications}
+        userId={user.uid}
+        onNavigate={handleNavigate}
+        markAsRead={markAsRead}
+        markAllAsRead={markAllAsRead}
+        deleteNotification={deleteNotification}
+        clearAll={clearAll}
+        isDarkMode={isDarkMode}
+      />
     </ErrorBoundary>
   );
 };

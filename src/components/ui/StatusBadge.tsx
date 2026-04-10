@@ -1,5 +1,6 @@
 import React from 'react';
-import { CheckCircle2, AlertCircle, Clock, PlayCircle, XCircle } from 'lucide-react';
+import { AlertCircle } from 'lucide-react';
+import { KANBAN_COLUMNS } from '../../config/kanbanColumns';
 
 interface StatusBadgeProps {
   status: string;
@@ -9,23 +10,16 @@ interface StatusBadgeProps {
 
 export const StatusBadge: React.FC<StatusBadgeProps> = ({ status, size = 'md', className = '' }) => {
   const getStatusConfig = (s: string) => {
-    switch (s.toLowerCase()) {
-      case 'completada':
-      case 'done':
-        return { color: 'bg-emerald-100 text-emerald-800 border-emerald-200', icon: CheckCircle2, label: 'Completada' };
-      case 'en progreso':
-      case 'in_progress':
-      case 'in progress':
-        return { color: 'bg-blue-100 text-blue-800 border-blue-200', icon: PlayCircle, label: 'En Progreso' };
-      case 'pendiente':
-      case 'todo':
-        return { color: 'bg-slate-100 text-slate-800 border-slate-200', icon: Clock, label: 'Pendiente' };
-      case 'bloqueada':
-      case 'blocked':
-        return { color: 'bg-red-100 text-red-800 border-red-200', icon: XCircle, label: 'Bloqueada' };
-      default:
-        return { color: 'bg-gray-100 text-gray-800 border-gray-200', icon: AlertCircle, label: status };
+    const config = KANBAN_COLUMNS.find(c => c.id === s.toLowerCase() || c.title.toLowerCase() === s.toLowerCase());
+    if (config) {
+      return { 
+        color: `${config.bg} ${config.color.replace('bg-', 'text-')} ${config.color.replace('bg-', 'border-')}`, 
+        icon: config.icon, 
+        label: config.title 
+      };
     }
+
+    return { color: 'bg-gray-100 text-gray-800 border-gray-200', icon: AlertCircle, label: status };
   };
 
   const config = getStatusConfig(status);

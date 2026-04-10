@@ -8,7 +8,12 @@ export interface Task {
   startDate?: string;
   endDate?: string;
   storyPoints?: number;
+  effort?: number;
+  resources?: string[];
   phase?: string;
+  x?: number;
+  y?: number;
+  color?: string;
   createdAt?: string;
   updatedAt?: string;
   dependencies?: string[];
